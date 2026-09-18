@@ -405,6 +405,17 @@ class Handler(BaseHTTPRequestHandler):
                 conn().rollback()               # keep the connection usable
             except Exception:                   # noqa: BLE001
                 _local.db = None
+            # The most likely failure in a fresh deploy is simply that nobody
+            # has set DATABASE_URL yet. Say so, rather than leaking a raw
+            # "no such table" that looks like a bug in the code.
+            if not db.IS_POSTGRES and "no such table" in str(e).lower():
+                return self._json({
+                    "error": "database not configured",
+                    "detail": "DATABASE_URL is not set, so this service fell back "
+                              "to an empty local SQLite file. Set DATABASE_URL to "
+                              "the Supabase connection string in the Render "
+                              "service's Environment tab, then redeploy.",
+                }, 503)
             self._json({"error": f"{type(e).__name__}: {e}"}, 500)
 
     do_HEAD = do_GET
