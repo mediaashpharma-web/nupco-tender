@@ -104,11 +104,23 @@ def sync_attachment(conn, run_id: int, tender: dict, role: str, url: str,
     # A row whose file is not on this disk must be fetched whatever the hash
     # says -- otherwise moving the database to another machine leaves every
     # document permanently missing.
-    # Only meaningful when we keep an archive. In cloud mode every run starts
-    # with an empty scratch dir, so "not on disk" would re-download all 800MB
-    # daily instead of just what actually changed.
-    missing = (C.KEEP_FILES and row is not None
-               and not (resolve(row["local_path"]) or Path("/x")).exists())
+    if C.KEEP_FILES:
+        missing = (row is not None
+                   and not (resolve(row["local_path"]) or Path("/x")).exists())
+    else:
+        # Cloud mode keeps no archive, and last run's bytes died with the
+        # runner. Re-fetching all 800MB nightly would be absurd, so we re-fetch
+        # exactly one class of document: an item list we have never managed to
+        # parse. That is what makes an interrupted run resumable rather than
+        # permanently stuck -- without it, the HEAD probe below says
+        # "unchanged", the file is never downloaded again, and the rows that
+        # run was killed before parsing can never be recovered.
+        #
+        # 'failed' is deliberately excluded: it already had its chance and its
+        # reason is recorded, so retrying it nightly would burn bandwidth and
+        # append an identical parse_failures row every single day.
+        missing = (row is not None and role == C.ITEM_LIST_ROLE
+                   and (row["parse_status"] or "pending") == "pending")
 
     # (2) Cheap HEAD probe when the URL is stable and we still hold the bytes.
     if row is not None and not url_moved and not force and not missing:

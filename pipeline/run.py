@@ -308,8 +308,12 @@ def parse_pending(conn, run_id: int, reparse_all: bool = False) -> int:
                 (row["id"], row["tender_id"], row["role"], str(path),
                  f"{type(e).__name__}: {e}"[:500], db.now(), run_id))
             log.warning("parse failed %s (%s): %s", row["tender_id"], row["filename"], e)
-        if n % 20 == 0:
+        if n % 5 == 0:
+            # Committed every 5 files, not every 20: parsing is the slowest
+            # phase and the likeliest place to be killed by a job timeout.
+            # Whatever is committed survives, and the next run skips it.
             conn.commit()
+        if n % 20 == 0:
             log.info("  parsed %d/%d item lists (%d rows)", n, len(rows), total)
     conn.commit()
     if rows:
