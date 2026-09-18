@@ -14,7 +14,7 @@ on:
         required: true
         default: incremental
         type: choice
-        options: [incremental, backfill, reparse, reclassify]
+        options: [incremental, backfill, seed, reparse, reclassify]
 
 concurrency:
   group: nupco-refresh          # never let two crawls write at once

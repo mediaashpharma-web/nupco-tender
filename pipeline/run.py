@@ -465,7 +465,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="NUPCO tender pipeline")
     ap.add_argument("mode", nargs="?", default="incremental",
                     choices=["backfill", "incremental", "reparse", "reclassify",
-                             "fetch-missing"])
+                             "fetch-missing", "seed"])
     ap.add_argument("--force", action="store_true",
                     help="ignore all skip heuristics and re-fetch everything")
     ap.add_argument("--limit", type=int, help="only process the first N tenders")
@@ -475,11 +475,18 @@ def main(argv=None) -> int:
                     help="time budget for fetch-missing; it is resumable")
     ap.add_argument("--verify", action="store_true",
                     help="also re-hash files already on disk and repair mismatches")
+    ap.add_argument("--snapshot", help="seed mode: path to the snapshot to load")
     ap.add_argument("--quiet", action="store_true")
     a = ap.parse_args(argv)
     _setup_logging(not a.quiet)
 
     try:
+        if a.mode == "seed":
+            # Imported here, not at module scope: seed imports from this module,
+            # so a top-level import would be circular.
+            from .seed import seed as load_seed
+            load_seed(a.snapshot)
+            return 0
         if a.mode == "fetch-missing":
             conn = db.connect()
             db.init(conn)

@@ -290,6 +290,92 @@ class TestSearch(unittest.TestCase):
 
 # --- real data sanity --------------------------------------------------------
 
+@unittest.skipIf(db.IS_POSTGRES,
+                 "seed test must never run against a live Postgres: seed()"
+                 " follows DATABASE_URL, not the path given here, so it would"
+                 " TRUNCATE the real database")
+class TestSeed(unittest.TestCase):
+    """The seed is a recovery path, so it has to be trustworthy unattended.
+
+    Builds a miniature snapshot and loads it, checking the three things that
+    would silently corrupt a real load: columns matched by name rather than
+    position, local_path blanked so the API never links a file that isn't
+    there, and a destination wiped first so a half-finished crawl leaves no
+    orphans behind.
+    """
+
+    def _snapshot(self, path: Path) -> None:
+        src = db.connect(str(path))
+        db.init(src, str(path), force=True)
+        src.execute(
+            "INSERT INTO tenders(post_id, tender_id, url, title_en, is_listed,"
+            " first_seen_at, last_seen_at) VALUES (?,?,?,?,?,?,?)",
+            (7, "NPT0007/26", "https://x/7/", "INSULIN GLARGINE", 1, "t0", "t0"))
+        src.execute(
+            "INSERT INTO attachments(post_id, tender_id, role, url, filename,"
+            " content_sha256, local_path, version, is_current, parse_status,"
+            " first_seen_at, last_seen_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (7, "NPT0007/26", C.ITEM_LIST_ROLE, "https://x/i.pdf", "i.pdf",
+             "d" * 64, "NPT0007-26/items.pdf", 1, 1, "parsed", "t0", "t0"))
+        src.execute(
+            "INSERT INTO tender_items(attachment_id, post_id, tender_id,"
+            " nupco_code, description, qty) VALUES (?,?,?,?,?,?)",
+            (1, 7, "NPT0007/26", "5100000000001", "INSULIN GLARGINE 100IU", 40.0))
+        src.commit()
+        src.close()
+
+    def test_seed_replaces_and_sanitises(self):
+        from pipeline import seed as seed_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snap = Path(tmp) / "snap.db"
+            self._snapshot(snap)
+
+            dest_path = Path(tmp) / "dest.db"
+            dest = db.connect(str(dest_path))
+            db.init(dest, str(dest_path), force=True)
+            # A half-finished crawl: a tender the snapshot knows nothing about.
+            dest.execute(
+                "INSERT INTO tenders(post_id, tender_id, url, is_listed,"
+                " first_seen_at, last_seen_at) VALUES (?,?,?,?,?,?)",
+                (999, "STALE/99", "https://x/999/", 1, "t0", "t0"))
+            dest.commit()
+            dest.close()
+
+            # db.py binds DB_PATH from config at import time, so redirecting
+            # the destination means patching the name db.connect() actually
+            # reads -- not the config module, and not the environment.
+            old = db.DB_PATH
+            db.DB_PATH = dest_path
+            try:
+                counts = seed_mod.seed(snap)
+            finally:
+                db.DB_PATH = old
+
+            self.assertEqual(counts["tenders"], 1)
+            self.assertEqual(counts["tender_items"], 1)
+
+            conn = db.connect(str(dest_path))
+            ids = [r["post_id"] for r in
+                   conn.execute("SELECT post_id FROM tenders").fetchall()]
+            self.assertEqual(ids, [7], "the stale tender survived the seed")
+
+            row = dict(conn.execute("SELECT * FROM attachments").fetchone())
+            self.assertIsNone(row["local_path"],
+                              "local_path must be blanked: the files are not here")
+            self.assertEqual(row["content_sha256"], "d" * 64,
+                             "columns look mismatched -- check name-based mapping")
+
+            item = dict(conn.execute("SELECT * FROM tender_items").fetchone())
+            self.assertEqual(item["nupco_code"], "5100000000001")
+            self.assertEqual(item["qty"], 40.0)
+
+            roll = dict(conn.execute(
+                "SELECT item_count FROM tenders WHERE post_id=7").fetchone())
+            self.assertEqual(roll["item_count"], 1, "rollups were not recomputed")
+            conn.close()
+
+
 class TestRealDatabase(unittest.TestCase):
     """Skipped automatically until the pipeline has produced a database."""
 

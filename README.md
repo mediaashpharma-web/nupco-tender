@@ -48,6 +48,7 @@ python -m pipeline.run incremental     daily refresh (the default)
 python -m pipeline.run reparse         re-parse stored files, no downloads
 python -m pipeline.run reclassify      re-apply category rules, no re-parse
 python -m pipeline.run fetch-missing   re-download documents absent from disk
+python -m pipeline.run seed            load seed/nupco-seed.db.gz wholesale
 python -m pipeline.report              markdown digest of the last run
 python -m tests.test_pipeline          34 tests, no network needed
 ```
@@ -120,8 +121,23 @@ places, both set by hand and never committed:
 * GitHub → Settings → Secrets and variables → Actions → `DATABASE_URL`
 * Render → the service's Environment tab → `DATABASE_URL`
 
-**First load.** Run the `NUPCO daily refresh` workflow manually with mode
-`backfill`. It takes 20–40 minutes and populates Supabase from scratch.
+**First load.** Run the workflow manually with mode `seed`. It loads a
+prepared snapshot of the whole database in well under a minute.
+
+Seeding exists because parsing is the expensive half of a first load and the
+only half worth avoiding twice. Extracting 133k line items from 221 PDFs takes
+~26 minutes on a laptop and several hours on a shared two-core runner -- long
+enough to lose a race with the job timeout, which is exactly what happened the
+first time. The work is deterministic, so re-deriving it in the cloud buys
+nothing but a way to fail. `backfill` still works and still crawls everything
+from scratch; it is simply the slow road.
+
+Refresh the snapshot from a local archive with:
+
+```bash
+python -m pipeline.run backfill      # locally, where files are kept
+# then rebuild seed/nupco-seed.db.gz from db/nupco.db
+```
 
 **Frontend.** `web/config.js` holds the Render API URL. Vercel serves `web/`
 as a static site; the page falls back to same-origin, so the Render service can
