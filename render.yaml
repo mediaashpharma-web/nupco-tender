@@ -1,0 +1,18 @@
+# Infrastructure for the search backend. The daily pipeline deliberately does
+# NOT live here: Render cron jobs are not in the free tier, so it runs as a
+# GitHub Actions schedule instead (.github/workflows/daily.yml).
+services:
+  - type: web
+    name: nupco-tender-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python api/app.py
+    healthCheckPath: /healthz
+    envVars:
+      - key: DATABASE_URL
+        sync: false          # set in the Render dashboard; never committed
+      - key: NUPCO_KEEP_FILES
+        value: "0"
+      - key: PYTHON_VERSION
+        value: "3.11.9"

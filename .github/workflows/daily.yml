@@ -1,0 +1,71 @@
+name: NUPCO daily refresh
+
+# Why GitHub Actions and not a hosted cron: Render's cron jobs are not in the
+# free tier, and Vercel's hobby functions cap out long before a crawl that
+# takes 10-30 minutes. Actions gives a real Python environment with no time
+# pressure, for nothing.
+on:
+  schedule:
+    - cron: "30 3 * * *"        # 03:30 UTC = 06:30 Riyadh / 09:00 IST
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Pipeline mode"
+        required: true
+        default: incremental
+        type: choice
+        options: [incremental, backfill, reparse, reclassify]
+
+concurrency:
+  group: nupco-refresh          # never let two crawls write at once
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write           # for the keepalive commit below
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pipeline
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          NUPCO_KEEP_FILES: "0"   # hash and parse documents, keep none
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL secret is not set."
+            echo "Add it under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          python -m pipeline.run "${{ inputs.mode || 'incremental' }}"
+
+      - name: Summarise the run
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m pipeline.report >> "$GITHUB_STEP_SUMMARY"
+
+      # GitHub disables scheduled workflows after 60 days without repo
+      # activity. Writing the run summary back is itself that activity, so the
+      # schedule keeps itself alive instead of silently dying in two months.
+      - name: Keep the schedule alive
+        if: always()
+        run: |
+          mkdir -p state
+          date -u +"last run: %Y-%m-%dT%H:%M:%SZ" > state/last-run.txt
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state/last-run.txt
+          git diff --quiet --cached || git commit -m "chore: record daily run [skip ci]"
+          git push || echo "push skipped"

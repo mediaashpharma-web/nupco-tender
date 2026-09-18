@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NUPCO Tender Search</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --panel:#fff; --line:#e3e6ea; --ink:#12151a; --muted:#6b7280;
+    --accent:#0097ca; --accent-ink:#fff; --hover:#f0f3f6;
+    --pharma:#0e9f6e; --device:#6c63d9; --lab:#0097ca; --dental:#d97706;
+    --equipment:#8b5cf6; --consumable:#0891b2;
+    --service:#6b7280; --other:#9ca3af; --danger:#b91c1c; --warn:#c2410c;
+    --radius:10px; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{ --bg:#0f1216; --panel:#161a20; --line:#262c35; --ink:#e7eaee;
+           --muted:#9aa4b2; --hover:#1d232b; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+  header{position:sticky;top:0;z-index:20;background:var(--panel);
+         border-bottom:1px solid var(--line);padding:12px 20px}
+  .top{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+  .brand{font-weight:700;font-size:16px;letter-spacing:-.01em;white-space:nowrap}
+  .brand span{color:var(--accent)}
+  .stats{display:flex;gap:14px;flex-wrap:wrap;margin-left:auto;font-size:12px;color:var(--muted)}
+  .stats b{color:var(--ink);font-variant-numeric:tabular-nums}
+  .tabs{display:flex;gap:4px;margin-top:12px}
+  .tab{padding:6px 14px;border-radius:999px;border:1px solid transparent;
+       cursor:pointer;color:var(--muted);font-weight:500}
+  .tab:hover{background:var(--hover)}
+  .tab.on{background:var(--accent);color:var(--accent-ink)}
+  main{padding:20px;max-width:1500px;margin:0 auto}
+  .bar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+  input[type=search],input[type=text],select{
+    padding:9px 12px;border:1px solid var(--line);border-radius:var(--radius);
+    background:var(--panel);color:var(--ink);font:inherit;outline:none}
+  input[type=search]{flex:1;min-width:240px}
+  select{max-width:220px;text-overflow:ellipsis}
+  input:focus,select:focus{border-color:var(--accent)}
+  label.chk{display:flex;align-items:center;gap:6px;color:var(--muted);cursor:pointer;
+            user-select:none;white-space:nowrap}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+         overflow:hidden}
+  table{width:100%;border-collapse:collapse}
+  th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);
+        vertical-align:top}
+  th{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);
+     font-weight:600;position:sticky;top:0;background:var(--panel);z-index:1}
+  tbody tr:hover{background:var(--hover)}
+  tbody tr{cursor:pointer}
+  td.num{text-align:right;font-variant-numeric:tabular-nums;font-family:var(--mono)}
+  .code{font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;
+        font-weight:600;color:#fff;white-space:nowrap}
+  .desc{max-width:620px}
+  .sub{color:var(--muted);font-size:12px}
+  .muted{color:var(--muted)}
+  .right{margin-left:auto}
+  .empty{padding:48px;text-align:center;color:var(--muted)}
+  .count{color:var(--muted);font-size:12px;margin-left:auto}
+  button.btn{padding:8px 14px;border:1px solid var(--line);background:var(--panel);
+             color:var(--ink);border-radius:var(--radius);cursor:pointer;font:inherit}
+  button.btn:hover{background:var(--hover)}
+  button.btn:disabled{opacity:.45;cursor:default}
+  /* drawer */
+  #scrim{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;z-index:40}
+  #scrim.on{display:block}
+  #drawer{position:fixed;top:0;right:0;bottom:0;width:min(940px,96vw);z-index:50;
+          background:var(--panel);border-left:1px solid var(--line);overflow:auto;
+          transform:translateX(100%);transition:transform .18s ease}
+  #drawer.on{transform:none}
+  .dhead{position:sticky;top:0;background:var(--panel);border-bottom:1px solid var(--line);
+         padding:16px 20px;display:flex;gap:12px;align-items:flex-start}
+  .dbody{padding:20px}
+  .kv{display:grid;grid-template-columns:170px 1fr;gap:6px 14px;margin-bottom:20px}
+  .kv dt{color:var(--muted);font-size:12px}
+  .kv dd{margin:0}
+  h3{margin:22px 0 8px;font-size:13px;text-transform:uppercase;letter-spacing:.05em;
+     color:var(--muted)}
+  .files{display:flex;flex-direction:column;gap:6px}
+  .file{display:flex;gap:10px;align-items:center;padding:9px 12px;border:1px solid var(--line);
+        border-radius:8px}
+  .x{cursor:pointer;font-size:22px;line-height:1;color:var(--muted);background:none;
+     border:none;padding:0 4px}
+  .ar{direction:rtl;text-align:right;font-size:13px}
+  .spin{display:inline-block;width:12px;height:12px;border:2px solid var(--line);
+        border-top-color:var(--accent);border-radius:50%;animation:s .7s linear infinite}
+  @keyframes s{to{transform:rotate(360deg)}}
+  .err{padding:14px;border:1px solid var(--danger);border-radius:var(--radius);
+       color:var(--danger);background:var(--panel)}
+</style>
+</head>
+<body>
+<header>
+  <div class="top">
+    <div class="brand">nupco<span>·</span>tender search</div>
+    <div class="stats" id="stats"><span class="spin"></span></div>
+  </div>
+  <div class="tabs">
+    <div class="tab on" data-tab="items">Items &amp; drugs</div>
+    <div class="tab" data-tab="catalog">Catalogue</div>
+    <div class="tab" data-tab="tenders">Tenders</div>
+    <div class="tab" data-tab="changes">Changes</div>
+  </div>
+</header>
+
+<main>
+  <div class="bar">
+    <input type="search" id="q" placeholder="Search a drug, device, SAP code or tender…" autofocus>
+    <select id="category">
+      <option value="">All categories</option>
+      <option value="pharma">Pharma</option><option value="device">Device</option>
+      <option value="lab">Lab</option><option value="dental">Dental</option>
+      <option value="equipment">Equipment</option><option value="consumable">Consumable</option>
+      <option value="service">Service</option><option value="other">Other</option>
+    </select>
+    <select id="status"><option value="">All statuses</option></select>
+    <select id="sort" title="Sort order">
+      <option value="relevance">Sort: best match</option>
+      <option value="opening_desc">Sort: opening date, newest</option>
+      <option value="opening_asc">Sort: opening date, oldest</option>
+      <option value="deadline_asc">Sort: deadline, soonest</option>
+      <option value="deadline_desc">Sort: deadline, latest</option>
+      <option value="qty_desc">Sort: quantity, largest</option>
+    </select>
+    <label class="chk"><input type="checkbox" id="open_only"> Open only</label>
+    <label class="chk"><input type="checkbox" id="hide_accessories" checked> Hide accessory lines</label>
+  </div>
+  <div class="panel"><div id="results"><div class="empty"><span class="spin"></span></div></div></div>
+  <div class="bar" style="margin-top:12px">
+    <button class="btn" id="prev" disabled>← Previous</button>
+    <button class="btn" id="next" disabled>Next →</button>
+    <span class="count" id="count"></span>
+  </div>
+</main>
+
+<div id="scrim"></div>
+<aside id="drawer"><div id="dcontent"></div></aside>
+
+<script src="config.js" onerror="window.NUPCO_API=window.NUPCO_API||''"></script>
+<script>
+// Where the JSON API lives. Empty means same-origin (the backend serving this
+// page); Vercel deployments get an absolute Render URL from config.js. A ?api=
+// override makes it easy to point a local page at the deployed backend.
+const API = (new URLSearchParams(location.search).get('api')
+             || window.NUPCO_API || '').replace(/\/$/, '');
+const $ = s => document.querySelector(s);
+const esc = s => (s==null?'':String(s)).replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const num = n => n==null ? '' : Number(n).toLocaleString();
+const CAT = ['pharma','device','lab','dental','equipment','consumable','service','other'];
+const catPill = c => `<span class="pill" style="background:var(--${CAT.includes(c)?c:'other'})">${esc(c||'other')}</span>`;
+const deadline = d => d==null ? '<span class="muted">—</span>'
+  : d < 0 ? `<span style="color:var(--muted)">closed ${-d}d ago</span>`
+  : d <= 7 ? `<span style="color:var(--warn);font-weight:600">${d}d left</span>`
+  : `${d}d left`;
+
+let state = {tab:'items', offset:0, limit:50, total:0};
+let timer = null;
+
+async function get(url){
+  const r = await fetch(API + url);
+  const j = await r.json();
+  if (j.error) throw new Error(j.error);
+  return j;
+}
+
+async function loadStats(){
+  try{
+    const s = await get('/api/stats');
+    const r = s.last_run || {};
+    $('#stats').innerHTML = `
+      <span><b>${num(s.tenders)}</b> tenders</span>
+      <span><b>${num(s.open_tenders)}</b> open</span>
+      <span><b>${num(s.items)}</b> line items</span>
+      <span><b>${num(s.codes)}</b> SAP codes</span>
+      <span><b>${num(s.files)}</b> files</span>
+      <span title="${esc(r.finished_at||'')}">last run: <b>${esc(r.status||'—')}</b>
+        ${r.finished_at ? esc(String(r.finished_at).slice(0,16).replace('T',' ')) : ''}</span>`;
+    const sel = $('#status');
+    if (sel.options.length <= 1)
+      (s.by_status||[]).forEach(x => sel.add(new Option(`${x.label} (${x.n})`, x.label)));
+  }catch(e){ $('#stats').innerHTML = `<span class="muted">${esc(e.message)}</span>`; }
+}
+
+function params(){
+  const p = new URLSearchParams();
+  p.set('q', $('#q').value.trim());
+  p.set('limit', state.limit); p.set('offset', state.offset);
+  if ($('#category').value) p.set('category', $('#category').value);
+  if ($('#status').value)   p.set('status', $('#status').value);
+  if ($('#sort').value) p.set('sort', $('#sort').value);
+  if ($('#open_only').checked) p.set('open_only','1');
+  if ($('#hide_accessories').checked) p.set('hide_accessories','1');
+  return p;
+}
+
+async function load(){
+  const box = $('#results');
+  box.innerHTML = '<div class="empty"><span class="spin"></span></div>';
+  state.total = 0;
+  try{
+    if (state.tab === 'changes'){
+      renderChanges(await get('/api/changes?limit=300'));
+    } else if (state.tab === 'catalog'){
+      const p = params(); p.delete('offset');
+      renderCatalog(await get('/api/catalog?'+p));
+    } else {
+      const p = params(); p.set('mode', state.tab);
+      const data = await get('/api/search?'+p);
+      state.total = data.total;
+      (state.tab === 'tenders' ? renderTenders : renderItems)(data);
+    }
+  }catch(e){ box.innerHTML = `<div class="empty"><div class="err">${esc(e.message)}</div></div>`; }
+  updatePager();
+}
+
+function updatePager(){
+  const paged = state.tab === 'items' || state.tab === 'tenders';
+  $('#prev').style.display = $('#next').style.display = paged ? '' : 'none';
+  if (!paged){
+    $('#count').textContent = state.total ? `${num(state.total)} rows` : '';
+    return;
+  }
+  const shown = Math.min(state.offset + state.limit, state.total);
+  $('#count').textContent = state.total
+    ? `${state.offset+1}–${shown} of ${num(state.total)}` : '';
+  $('#prev').disabled = state.offset <= 0;
+  $('#next').disabled = shown >= state.total;
+}
+
+function table(head, body){
+  return body ? `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`
+              : `<div class="empty">Nothing matched. Try a shorter term, or clear the filters.</div>`;
+}
+
+function renderItems(d){
+  $('#results').innerHTML = table(
+    `<th>Item</th><th>SAP code</th><th>Tender</th><th>Status</th>
+     <th class="num">Qty</th><th>UOM</th><th>Opened</th><th>Deadline</th>`,
+    d.results.map(r => `<tr onclick="openTender(${r.post_id})">
+      <td class="desc">${esc(r.description)}
+        <div class="sub">${catPill(r.category_guess)}
+          ${r.is_accessory ? '<span class="sub"> · accessory line</span>':''}</div></td>
+      <td class="code">${esc(r.nupco_code)}</td>
+      <td><b>${esc(r.tender_id)}</b><div class="sub">${esc((r.title_en||'').slice(0,60))}</div></td>
+      <td class="sub">${esc(r.status_label)}</td>
+      <td class="num">${num(r.qty)}</td>
+      <td class="sub">${esc(r.uom||'')}</td>
+      <td class="sub">${esc(r.opening_ts||'—')}</td>
+      <td class="sub">${esc(r.submission_ts||'')}<div>${deadline(r.days_to_deadline)}</div></td>
+    </tr>`).join(''));
+}
+
+function renderTenders(d){
+  $('#results').innerHTML = table(
+    `<th>Tender</th><th>Status</th><th>Category</th><th class="num">Items</th>
+     <th class="num">Total qty</th><th class="num">Booklet SAR</th><th>Opens</th><th>Deadline</th>`,
+    d.results.map(r => `<tr onclick="openTender(${r.post_id})">
+      <td class="desc"><b>${esc(r.tender_id)}</b>
+        ${r.is_listed ? '' : '<span class="sub"> · not listed</span>'}
+        <div class="sub">${esc((r.title_en||r.title_ar||'').slice(0,90))}</div></td>
+      <td class="sub">${esc(r.status_label)}</td>
+      <td>${catPill(r.category_guess)}</td>
+      <td class="num">${num(r.item_count)}</td>
+      <td class="num">${num(r.total_qty)}</td>
+      <td class="num">${r.booklet_price_sar?num(r.booklet_price_sar):'<span class="muted">—</span>'}</td>
+      <td class="sub">${esc(r.opening_ts||'')}</td>
+      <td class="sub">${esc(r.submission_ts||'')}<div>${deadline(r.days_to_deadline)}</div></td>
+    </tr>`).join(''));
+}
+
+function renderCatalog(d){
+  $('#results').innerHTML = table(
+    `<th>Item (by SAP code)</th><th>SAP code</th><th class="num">Tenders</th>
+     <th class="num">Lines</th><th class="num">Total qty</th><th>Latest deadline</th>`,
+    d.results.map(r => `<tr onclick="openCode('${esc(r.nupco_code)}')">
+      <td class="desc">${esc(r.description)}<div class="sub">${catPill(r.category_guess)}</div></td>
+      <td class="code">${esc(r.nupco_code)}</td>
+      <td class="num">${num(r.tender_count)}</td>
+      <td class="num">${num(r.line_count)}</td>
+      <td class="num">${num(r.total_qty)}</td>
+      <td class="sub">${esc(r.latest_deadline||'')}</td>
+    </tr>`).join(''));
+  state.total = d.results.length;
+}
+
+function renderChanges(d){
+  const label = {new:'new tender', update:'updated', delist:'left the list', relist:'back on the list'};
+  $('#results').innerHTML = table(
+    `<th>When</th><th>What</th><th>Tender</th><th>Field</th><th>From</th><th>To</th>`,
+    d.results.map(r => `<tr onclick="openTender(${r.post_id})">
+      <td class="sub">${esc(String(r.changed_at||'').slice(0,16).replace('T',' '))}</td>
+      <td>${esc(label[r.change_kind]||r.change_kind)}</td>
+      <td><b>${esc(r.tender_id)}</b><div class="sub">${esc((r.title_en||'').slice(0,50))}</div></td>
+      <td class="sub">${esc(r.field)}</td>
+      <td class="sub">${esc(String(r.old_value??'').slice(0,60))}</td>
+      <td class="sub">${esc(String(r.new_value??'').slice(0,60))}</td>
+    </tr>`).join(''));
+  state.total = d.results.length;
+}
+
+// --- drawer ------------------------------------------------------------------
+function closeDrawer(){ $('#drawer').classList.remove('on'); $('#scrim').classList.remove('on'); }
+$('#scrim').onclick = closeDrawer;
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDrawer(); });
+
+function showDrawer(html){
+  $('#dcontent').innerHTML = html;
+  $('#drawer').classList.add('on'); $('#scrim').classList.add('on');
+  $('#drawer').scrollTop = 0;
+}
+
+async function openTender(id){
+  if (!id) return;
+  showDrawer('<div class="dbody"><span class="spin"></span></div>');
+  try{
+    const t = await get('/api/tender/'+id);
+    const files = (t.attachments||[]).map(a => `<div class="file">
+        <div style="flex:1"><b>${esc(a.role)}</b>
+          <div class="sub">${esc(a.filename)} · ${num(Math.round((a.size_bytes||0)/1024))} KB
+          ${a.version>1?` · version ${a.version}`:''}
+          ${a.parse_status==='parsed'?` · ${num(a.parse_rows)} rows parsed`:''}
+          ${a.parse_status==='failed'?' · <span style="color:var(--danger)">parse failed</span>':''}</div></div>
+        <a class="btn" href="${API}/file/${a.id}" target="_blank">Open document</a>
+        <a class="btn" href="${esc(a.url)}" target="_blank">Source</a></div>`).join('')
+      || '<div class="muted">No files.</div>';
+
+    const items = (t.items||[]).map(i => `<tr>
+        <td class="sub">${esc(i.sn||'')}</td>
+        <td class="code">${esc(i.nupco_code||'')}</td>
+        <td class="desc">${esc(i.description)}</td>
+        <td class="sub">${esc(i.uom||'')}</td>
+        <td class="num">${num(i.qty)}</td>
+        <td>${catPill(i.category_guess)}</td></tr>`).join('');
+
+    const hist = (t.history||[]).map(h => `<tr>
+        <td class="sub">${esc(String(h.changed_at).slice(0,16).replace('T',' '))}</td>
+        <td class="sub">${esc(h.field)}</td>
+        <td class="sub">${esc(String(h.old_value??'').slice(0,70))}</td>
+        <td class="sub">${esc(String(h.new_value??'').slice(0,70))}</td></tr>`).join('');
+
+    showDrawer(`
+      <div class="dhead">
+        <div style="flex:1">
+          <div style="font-size:18px;font-weight:700">${esc(t.tender_id)}</div>
+          <div class="sub">${esc(t.title_en||'')}</div>
+          <div class="sub ar">${esc(t.title_ar||'')}</div>
+        </div>
+        <button class="x" onclick="closeDrawer()">×</button>
+      </div>
+      <div class="dbody">
+        <dl class="kv">
+          <dt>Status</dt><dd>${esc(t.status_label||'—')} ${catPill(t.category_guess)}</dd>
+          <dt>Opening date</dt><dd>${esc(t.opening_ts||'—')}</dd>
+          <dt>Submission deadline</dt><dd>${esc(t.submission_ts||'—')} · ${deadline(t.days_to_deadline)}</dd>
+          <dt>Bid opening</dt><dd>${esc(t.bid_opening_ts||'—')}</dd>
+          <dt>Booklet price</dt><dd>${t.booklet_price_sar?num(t.booklet_price_sar)+' SAR':'—'}</dd>
+          <dt>Line items</dt><dd>${num(t.item_count)} · total qty ${num(t.total_qty)}</dd>
+          <dt>Listed on site</dt><dd>${t.is_listed?'yes':'no (hidden or archived)'}</dd>
+          <dt>Last changed</dt><dd class="sub">${esc(String(t.last_changed_at||'').slice(0,16).replace('T',' '))}</dd>
+          <dt>Links</dt><dd><a href="${esc(t.url)}" target="_blank">Tender page</a>
+            ${t.buy_url?` · <a href="${esc(t.buy_url)}" target="_blank">Buy on SAP portal</a>`:''}</dd>
+        </dl>
+        <h3>Files</h3><div class="files">${files}</div>
+        <h3>Line items (${num(t.item_total)}${t.item_total > (t.items||[]).length
+          ? ` — showing first ${num((t.items||[]).length)}` : ''})</h3>
+        <div class="panel">${items ? `<table><thead><tr><th>SN</th><th>SAP code</th>
+          <th>Description</th><th>UOM</th><th class="num">Qty</th><th>Category</th></tr></thead>
+          <tbody>${items}</tbody></table>` : '<div class="empty">No parsed items.</div>'}</div>
+        <h3>Change history</h3>
+        <div class="panel">${hist ? `<table><thead><tr><th>When</th><th>Field</th>
+          <th>From</th><th>To</th></tr></thead><tbody>${hist}</tbody></table>`
+          : '<div class="empty">No changes recorded yet.</div>'}</div>
+      </div>`);
+  }catch(e){ showDrawer(`<div class="dbody"><div class="err">${esc(e.message)}</div></div>`); }
+}
+
+async function openCode(code){
+  showDrawer('<div class="dbody"><span class="spin"></span></div>');
+  try{
+    const d = await get('/api/code/'+encodeURIComponent(code));
+    const s = d.summary || {};
+    const lines = (d.lines||[]).map(l => `<tr onclick="openTender(${l.post_id})">
+        <td><b>${esc(l.tender_id)}</b></td>
+        <td class="sub">${esc(l.status_label||'')}</td>
+        <td class="num">${num(l.qty)}</td><td class="sub">${esc(l.uom||'')}</td>
+        <td class="sub">${esc(l.submission_ts||'')}</td>
+        <td class="desc sub">${esc((l.description||'').slice(0,90))}</td></tr>`).join('');
+    showDrawer(`
+      <div class="dhead"><div style="flex:1">
+        <div style="font-size:18px;font-weight:700" class="code">${esc(code)}</div>
+        <div class="sub">${esc(s.description||'')}</div></div>
+        <button class="x" onclick="closeDrawer()">×</button></div>
+      <div class="dbody">
+        <dl class="kv">
+          <dt>Appears in</dt><dd>${num(s.tender_count)} tenders · ${num(s.line_count)} lines</dd>
+          <dt>Total quantity</dt><dd>${num(s.total_qty)}</dd>
+          <dt>Category</dt><dd>${catPill(s.category_guess)}</dd>
+          <dt>Latest deadline</dt><dd>${esc(s.latest_deadline||'—')}</dd>
+        </dl>
+        <h3>Every tender containing this code</h3>
+        <div class="panel"><table><thead><tr><th>Tender</th><th>Status</th>
+          <th class="num">Qty</th><th>UOM</th><th>Deadline</th><th>Description as published</th>
+          </tr></thead><tbody>${lines}</tbody></table></div>
+      </div>`);
+  }catch(e){ showDrawer(`<div class="dbody"><div class="err">${esc(e.message)}</div></div>`); }
+}
+
+// --- wiring ------------------------------------------------------------------
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('on'));
+  t.classList.add('on');
+  state.tab = t.dataset.tab; state.offset = 0;
+  $('#q').placeholder = state.tab === 'tenders'
+    ? 'Search tender titles and ids…'
+    : state.tab === 'changes' ? 'Change feed (search does not apply here)'
+    : 'Search a drug, device, SAP code or tender…';
+  load();
+});
+$('#q').oninput = () => {
+  // "best match" needs a query; fall back to newest-first when the box is empty
+  // so the list never silently orders by the longest-closed tender.
+  const hasQ = $('#q').value.trim().length > 0;
+  const opt = $('#sort').querySelector('option[value="relevance"]');
+  opt.disabled = !hasQ;
+  opt.textContent = hasQ ? 'Sort: best match' : 'Sort: best match (type to search)';
+  if (!hasQ && $('#sort').value === 'relevance') $('#sort').value = 'opening_desc';
+  if (hasQ && $('#sort').dataset.auto === '1') { $('#sort').value = 'relevance';
+                                                $('#sort').dataset.auto = '0'; }
+  clearTimeout(timer); timer = setTimeout(() => { state.offset = 0; load(); }, 280);
+};
+['category','status','sort','open_only','hide_accessories'].forEach(id =>
+  $('#'+id).onchange = () => { state.offset = 0; load(); });
+$('#prev').onclick = () => { state.offset = Math.max(0, state.offset - state.limit); load(); };
+$('#next').onclick = () => { state.offset += state.limit; load(); };
+
+$('#sort').value = 'opening_desc';
+$('#sort').dataset.auto = '1';
+$('#sort').querySelector('option[value="relevance"]').disabled = true;
+$('#sort').querySelector('option[value="relevance"]').textContent =
+  'Sort: best match (type to search)';
+loadStats(); load();
+setInterval(loadStats, 60000);
+</script>
+</body>
+</html>

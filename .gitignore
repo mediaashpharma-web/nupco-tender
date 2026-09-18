@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+db/
+files/
+logs/
+*.db
+*.db-*
+.env
+.venv/
+.deploy-key*
+
+# the keepalive commit needs this tracked
+!state/
