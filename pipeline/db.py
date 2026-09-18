@@ -370,10 +370,23 @@ class Connection:
         return Cursor(cur)
 
     def executemany(self, sql: str, rows) -> Cursor:
+        """Bulk insert, batched into as few network round trips as possible.
+
+        psycopg2's own executemany sends one statement per row and waits for
+        each. Against a database on the same machine that is merely wasteful;
+        against a managed one across the internet it is fatal -- at a typical
+        50ms round trip, 130k rows is over an hour of pure waiting, which is
+        how a load measured at 27 seconds locally turned into 100 minutes on a
+        CI runner. execute_batch packs many statements into one trip.
+        """
         rows = [tuple(r) for r in rows]
         cur = self._raw.cursor()
         if rows:
-            cur.executemany(self._sql(sql), rows)
+            if self.is_pg:
+                from psycopg2.extras import execute_batch
+                execute_batch(cur, self._sql(sql), rows, page_size=500)
+            else:
+                cur.executemany(sql, rows)
         return Cursor(cur)
 
     def insert_returning_id(self, sql: str, args: Iterable = (), pk: str = "id"):
