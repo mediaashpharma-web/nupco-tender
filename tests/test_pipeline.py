@@ -245,6 +245,43 @@ class TestParsers(unittest.TestCase):
 # --- search ------------------------------------------------------------------
 
 class TestSearch(unittest.TestCase):
+    def test_tender_id_finds_its_line_items(self):
+        """Typing a tender id must list that tender's items, slash and all.
+
+        Two real bugs lived here, both introduced by the Postgres port and both
+        invisible on SQLite. The items vector indexed description, code and
+        item number but not tender_id, so a tender id matched no line item at
+        all. And Postgres reads "NDP0838/26" as one file-like lexeme while the
+        API splits the typed query on the slash into 'ndp0838 & 26', so the id
+        a person copies off the portal matched nothing while the truncated
+        'NDP0838' matched by prefix -- the confusing half-working case.
+        """
+        sys.path.insert(0, str(ROOT / "api"))
+        import app as server
+
+        TID = "NDP0838/26"
+        if db.IS_POSTGRES:
+            conn = db.connect()
+            db.init(conn)
+            probe = ("SELECT COUNT(*) AS c FROM tender_items"
+                     " WHERE search_vector @@ to_tsquery('english', ?)")
+        else:
+            conn = fresh_db()
+            probe = ("SELECT COUNT(*) AS c FROM items_fts"
+                     " WHERE items_fts MATCH ?")
+        db.upsert_tender(conn, 1, tender(post_id=91, tender_id=TID,
+                                         url="https://x/91/"))
+        items.store_items(conn, 1, 91, TID, [
+            {"nupco_code": "4229600645800", "description": "COVER FOR HEAD LARGE",
+             "qty": 500.0, "category_guess": "device"}])
+        conn.commit()
+        db.rebuild_fts(conn)
+
+        for query in (TID, "NDP0838", "ndp0838/26", "COVER FOR HEAD LARGE"):
+            with self.subTest(query=query):
+                n = dict(conn.execute(probe, (server.fts_query(query),)).fetchone())["c"]
+                self.assertGreater(n, 0, f"{query!r} matched no line items")
+
     def test_fts_query_is_injection_safe(self):
         """Hostile input must never reach the engine as syntax.
 
@@ -304,7 +341,7 @@ class TestSeed(unittest.TestCase):
     orphans behind.
     """
 
-    def _snapshot(self, path: Path) -> None:
+    def _snapshot(self, path: Path, *, extra_column: bool = False) -> None:
         src = db.connect(str(path))
         db.init(src, str(path), force=True)
         src.execute(

@@ -26,6 +26,7 @@ only other requirements are an HTTP client and two file parsers.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -34,6 +35,8 @@ from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from .config import DB_PATH
+
+log = logging.getLogger("nupco.db")
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 IS_POSTGRES = bool(DATABASE_URL)
@@ -236,16 +239,32 @@ CREATE VIRTUAL TABLE IF NOT EXISTS tenders_fts USING fts5(
 # Postgres full-text: generated tsvector columns, so they can never drift out
 # of step with their rows the way a trigger-maintained index can.
 _PG_FTS = """
+-- Two things here are not obvious and were both bugs.
+--
+-- tender_id is indexed on the ITEMS vector, not just on tenders. SQLite's
+-- items_fts has always carried it, so searching a tender id listed that
+-- tender's line items; the first Postgres port dropped it and the same search
+-- silently returned nothing.
+--
+-- It is indexed twice: raw, and with '/' replaced by a space. Postgres's
+-- parser reads "NDP0838/26" as a single file-like lexeme 'ndp0838/26', while
+-- the API splits the typed query on non-word characters into 'ndp0838 & 26'.
+-- No lexeme begins with "26", so the exact id a person copies off the site
+-- matched nothing, while the truncated "NDP0838" matched by prefix. Indexing
+-- the split form too makes both spellings work, and matches how SQLite's
+-- unicode61 tokenizer has always treated it.
 ALTER TABLE tender_items ADD COLUMN IF NOT EXISTS search_vector tsvector
     GENERATED ALWAYS AS (to_tsvector('english',
         coalesce(description,'') || ' ' || coalesce(nupco_code,'') || ' '
-        || coalesce(item_no,''))) STORED;
+        || coalesce(item_no,'') || ' ' || coalesce(tender_id,'') || ' '
+        || replace(coalesce(tender_id,''), '/', ' '))) STORED;
 CREATE INDEX IF NOT EXISTS idx_items_search ON tender_items USING GIN(search_vector);
 
 ALTER TABLE tenders ADD COLUMN IF NOT EXISTS search_vector tsvector
     GENERATED ALWAYS AS (to_tsvector('english',
         coalesce(title_en,'') || ' ' || coalesce(title_ar,'') || ' '
-        || coalesce(tender_id,''))) STORED;
+        || coalesce(tender_id,'') || ' '
+        || replace(coalesce(tender_id,''), '/', ' '))) STORED;
 CREATE INDEX IF NOT EXISTS idx_tenders_search ON tenders USING GIN(search_vector);
 """
 
@@ -504,6 +523,8 @@ def init(conn: Connection, path=None, force: bool = False) -> str:
     """
     mode = set_journal_mode(conn, path)
     if not force and schema_exists(conn):
+        # Cheap catalog read; only does work when the definition actually moved.
+        migrate_fts(conn)
         return mode
     for statement in schema_sql(conn.is_pg):
         try:
@@ -516,9 +537,77 @@ def init(conn: Connection, path=None, force: bool = False) -> str:
             if "already exists" not in str(e).lower():
                 raise
     _add_missing_columns(conn)
+    migrate_fts(conn)
     _migrate_absolute_paths(conn)
     conn.commit()
     return mode
+
+
+# Present only in the corrected definition above, so its absence identifies a
+# database still carrying the old one.
+_FTS_MARKER = "replace"
+
+_IS_VIEW = re.compile(r"\s*CREATE (OR REPLACE )?VIEW", re.I)
+
+
+def _view_names() -> list[str]:
+    """Declaration order, so dropping in reverse takes children before parents."""
+    return re.findall(r"CREATE VIEW IF NOT EXISTS (\w+)", _VIEWS)
+
+
+def _pg_fts_is_current(conn: Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT generation_expression AS e FROM information_schema.columns"
+        " WHERE table_name=? AND column_name='search_vector'", (table,)).fetchone()
+    return bool(row and row["e"] and _FTS_MARKER in row["e"])
+
+
+def migrate_fts(conn: Connection) -> bool:
+    """Rebuild the Postgres search vectors when their definition has changed.
+
+    A generated column cannot be altered in place and ADD COLUMN IF NOT EXISTS
+    quietly does nothing when one is already there, so a database created
+    before the definition changed would keep the old, broken index forever.
+    Dropping and re-adding is cheap here: the column is derived, so no source
+    data is touched and nothing can be lost.
+    """
+    if not conn.is_pg:
+        return False                 # SQLite rebuilds its FTS tables instead
+    stale = [t for t in ("tender_items", "tenders")
+             if not _pg_fts_is_current(conn, t)]
+    if not stale:
+        return False
+    log.info("search index is out of date for %s, rebuilding", ", ".join(stale))
+
+    statements = schema_sql(is_pg=True)
+    view_sql = [x for x in statements if _IS_VIEW.match(x)]
+    fts_sql = [x for x in statements if "search_vector" in x]
+
+    # Fail fast rather than queue behind a reader: the API holds connections
+    # open, and an ACCESS EXCLUSIVE lock waiting on one would hang the run.
+    conn.execute("SET lock_timeout = '30s'")
+    try:
+        # v_current_items selects i.*, so it carries search_vector and pins the
+        # column in place. CREATE OR REPLACE VIEW cannot help -- it refuses to
+        # change a view's column list -- so the views come down and go back up
+        # around the change. They are derived, so this loses nothing, but it
+        # does mean a few seconds where the API cannot read them.
+        for name in reversed(_view_names()):
+            conn.execute(f"DROP VIEW IF EXISTS {name} CASCADE")
+        for table in stale:
+            conn.execute(f"ALTER TABLE {table} DROP COLUMN IF EXISTS search_vector")
+        for statement in fts_sql + view_sql:
+            conn.execute(statement)
+        conn.commit()
+    except Exception:                           # noqa: BLE001
+        conn.rollback()
+        log.error("search index rebuild failed; the old index is still in place")
+        raise
+    finally:
+        conn.execute("SET lock_timeout = DEFAULT")
+        conn.commit()
+    log.info("search index rebuilt")
+    return True
 
 
 def table_columns(conn: Connection, table: str) -> set:
