@@ -54,6 +54,12 @@
   tbody tr{cursor:pointer}
   td.num{text-align:right;font-variant-numeric:tabular-nums;font-family:var(--mono)}
   .code{font-family:var(--mono);font-size:12px;color:var(--muted)}
+  /* The SAP code column is hidden, not removed. Every code is still in the
+     database, still returned by the API, and still searchable -- typing one
+     into the search box finds its items. Set SHOW_SAP_CODE = true below to
+     put the column back; nothing else has to change. */
+  .code{display:none}
+  body.show-sap-code .code{display:table-cell}
   .pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;
         font-weight:600;color:#fff;white-space:nowrap}
   .desc{max-width:620px}
@@ -110,7 +116,7 @@
 
 <main>
   <div class="bar">
-    <input type="search" id="q" placeholder="Search a drug, device, SAP code or tender…" autofocus>
+    <input type="search" id="q" placeholder="Search a drug, device or tender…" autofocus>
     <select id="category">
       <option value="">All categories</option>
       <option value="pharma">Pharma</option><option value="device">Device</option>
@@ -148,6 +154,12 @@
 // override makes it easy to point a local page at the deployed backend.
 const API = (new URLSearchParams(location.search).get('api')
              || window.NUPCO_API || '').replace(/\/$/, '');
+// The SAP material code is collected, stored and searchable, but not shown:
+// it is internal NUPCO numbering that clutters the table for a reader who is
+// looking for a drug. Flip this to true to bring the column back everywhere.
+const SHOW_SAP_CODE = false;
+if (SHOW_SAP_CODE) document.body.classList.add('show-sap-code');
+
 const $ = s => document.querySelector(s);
 const esc = s => (s==null?'':String(s)).replace(/[&<>"']/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -177,7 +189,7 @@ async function loadStats(){
       <span><b>${num(s.tenders)}</b> tenders</span>
       <span><b>${num(s.open_tenders)}</b> open</span>
       <span><b>${num(s.items)}</b> line items</span>
-      <span><b>${num(s.codes)}</b> SAP codes</span>
+      <span><b>${num(s.codes)}</b> distinct items</span>
       <span><b>${num(s.files)}</b> files</span>
       <span title="${esc(r.finished_at||'')}">last run: <b>${esc(r.status||'—')}</b>
         ${r.finished_at ? esc(String(r.finished_at).slice(0,16).replace('T',' ')) : ''}</span>`;
@@ -240,7 +252,7 @@ function table(head, body){
 
 function renderItems(d){
   $('#results').innerHTML = table(
-    `<th>Item</th><th>SAP code</th><th>Tender</th><th>Status</th>
+    `<th>Item</th><th class="code">SAP code</th><th>Tender</th><th>Status</th>
      <th class="num">Qty</th><th>UOM</th><th>Opened</th><th>Deadline</th>`,
     d.results.map(r => `<tr onclick="openTender(${r.post_id})">
       <td class="desc">${esc(r.description)}
@@ -276,7 +288,7 @@ function renderTenders(d){
 
 function renderCatalog(d){
   $('#results').innerHTML = table(
-    `<th>Item (by SAP code)</th><th>SAP code</th><th class="num">Tenders</th>
+    `<th>Item</th><th class="code">SAP code</th><th class="num">Tenders</th>
      <th class="num">Lines</th><th class="num">Total qty</th><th>Latest deadline</th>`,
     d.results.map(r => `<tr onclick="openCode('${esc(r.nupco_code)}')">
       <td class="desc">${esc(r.description)}<div class="sub">${catPill(r.category_guess)}</div></td>
@@ -369,7 +381,7 @@ async function openTender(id){
         <h3>Files</h3><div class="files">${files}</div>
         <h3>Line items (${num(t.item_total)}${t.item_total > (t.items||[]).length
           ? ` — showing first ${num((t.items||[]).length)}` : ''})</h3>
-        <div class="panel">${items ? `<table><thead><tr><th>SN</th><th>SAP code</th>
+        <div class="panel">${items ? `<table><thead><tr><th>SN</th><th class="code">SAP code</th>
           <th>Description</th><th>UOM</th><th class="num">Qty</th><th>Category</th></tr></thead>
           <tbody>${items}</tbody></table>` : '<div class="empty">No parsed items.</div>'}</div>
         <h3>Change history</h3>
@@ -419,7 +431,7 @@ document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
   $('#q').placeholder = state.tab === 'tenders'
     ? 'Search tender titles and ids…'
     : state.tab === 'changes' ? 'Change feed (search does not apply here)'
-    : 'Search a drug, device, SAP code or tender…';
+    : 'Search a drug, device or tender…';
   load();
 });
 $('#q').oninput = () => {
