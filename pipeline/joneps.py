@@ -708,6 +708,7 @@ def run(mode: str = "incremental", years: list[int] | None = None, force: bool =
         todo = todo[:limit]
     stopped_early = False
     batch: list[int] = []
+    n = 0
     for n, (pid, t) in enumerate(todo, start=1):
         if max_minutes and (time.monotonic() - started) / 60 > max_minutes:
             log.info("time budget of %s min reached after %d tenders; stopping cleanly",
@@ -732,9 +733,21 @@ def run(mode: str = "incremental", years: list[int] | None = None, force: bool =
             _checkpoint(conn, run_id, batch, counts, n, len(todo), client.requests)
             batch = []
 
+    if batch:                                   # the last, short batch
+        _checkpoint(conn, run_id, batch, counts, n - stopped_early, len(todo), client.requests)
+
+    # Housekeeping over the whole table. Every tender is already saved and
+    # rolled up batch by batch, so a failure here must not take the run with
+    # it -- above all it must not leave run_log saying "running" for ever.
     from .run import refresh_rollups
-    refresh_rollups(conn)
-    db.rebuild_fts(conn)
+    try:
+        refresh_rollups(conn)
+        db.rebuild_fts(conn)
+    except Exception as e:                      # noqa: BLE001
+        conn.rollback()
+        errors.append(f"rollups: {type(e).__name__}: {e}")
+        counts["errors"] += 1
+        log.warning("end-of-run rollups failed (data is saved): %s", e)
 
     complete = not stopped_early and not errors and not limit
     if complete and mode == "backfill" and years == list(range(FIRST_YEAR, this_year + 1)):

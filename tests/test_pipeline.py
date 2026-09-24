@@ -555,6 +555,27 @@ class TestJoneps(unittest.TestCase):
                          ("running", 100, 900))
         self.assertEqual(json.loads(r["notes"])["progress"], "100/7000")
 
+    def test_migrate_adds_a_new_index_to_a_current_database(self):
+        """The rollups' post_id index must reach the live database, which is
+        otherwise current -- migrate() used to return early on such a schema."""
+        conn = fresh_db()
+        conn.execute("DROP INDEX IF EXISTS idx_items_post")
+        conn.commit()
+        self.assertIn("+index idx_items_post", db.migrate(conn))
+        self.assertEqual(db.migrate(conn), [], "and a current schema is left alone")
+
+    def test_a_crashed_run_does_not_read_running_for_ever(self):
+        conn = fresh_db()
+        old = db.start_run(conn, "joneps-backfill")
+        conn.execute("UPDATE run_log SET started_at='2020-01-01T00:00:00+00:00' WHERE run_id=?",
+                     (old,))
+        conn.commit()
+        recent = db.start_run(conn, "joneps-backfill")
+        db.start_run(conn, "incremental")
+        st = {r["run_id"]: r["status"] for r in conn.execute("SELECT run_id, status FROM run_log")}
+        self.assertEqual(st[old], "abandoned")
+        self.assertEqual(st[recent], "running", "a run inside the window may still be alive")
+
     def test_one_source_never_delists_the_other(self):
         """Each crawler only sees its own portal. An unscoped delist sweep would
         let the nightly Saudi run mark every Jordanian tender as gone."""

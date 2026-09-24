@@ -31,7 +31,7 @@ import os
 import re
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
 from .config import DB_PATH
@@ -231,6 +231,7 @@ CREATE INDEX IF NOT EXISTS idx_att_hash       ON attachments(content_sha256);
 CREATE INDEX IF NOT EXISTS idx_items_att      ON tender_items(attachment_id);
 CREATE INDEX IF NOT EXISTS idx_items_code     ON tender_items(nupco_code);
 CREATE INDEX IF NOT EXISTS idx_items_tid      ON tender_items(tender_id);
+CREATE INDEX IF NOT EXISTS idx_items_post     ON tender_items(post_id);
 CREATE INDEX IF NOT EXISTS idx_items_cat      ON tender_items(category_guess);
 CREATE INDEX IF NOT EXISTS idx_tenders_source ON tenders(source);
 CREATE INDEX IF NOT EXISTS idx_items_rdl      ON tender_items(rdl_code);
@@ -670,6 +671,15 @@ def _missing_tables(conn: Connection) -> list[str]:
     return [t for t in wanted if not table_columns(conn, t)]
 
 
+def _missing_indexes(conn: Connection) -> list[str]:
+    wanted = re.findall(r"CREATE (?:UNIQUE )?INDEX IF NOT EXISTS (\w+)", _COMMON_TABLES)
+    if conn.is_pg:
+        have = {r["indexname"] for r in conn.execute("SELECT indexname FROM pg_indexes")}
+    else:
+        have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    return [i for i in wanted if i not in have]
+
+
 def _sqlite_fts_is_current(conn: Connection) -> bool:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(items_fts)").fetchall()}
     return not cols or "generic_name" in cols        # absent means "create fresh"
@@ -693,9 +703,10 @@ def migrate(conn: Connection) -> list[str]:
     narrow = _pg_narrow_post_ids(conn) if conn.is_pg else []
     missing_cols = _missing_columns(conn)
     missing_tables = _missing_tables(conn)
+    missing_indexes = _missing_indexes(conn)
     stale_fts = ([t for t in _FTS_MARKERS if not _pg_fts_is_current(conn, t)]
                  if conn.is_pg else ([] if _sqlite_fts_is_current(conn) else ["items_fts"]))
-    if not (narrow or missing_cols or missing_tables or stale_fts):
+    if not (narrow or missing_cols or missing_tables or missing_indexes or stale_fts):
         return done
 
     statements = schema_sql(conn.is_pg)
@@ -727,6 +738,10 @@ def migrate(conn: Connection) -> list[str]:
         for statement in creates:                  # new tables, then indexes
             conn.execute(statement)
         done += [f"+table {t}" for t in missing_tables]
+        # idx_items_post: every per-tender rollup looks items up by post_id.
+        # Without it each lookup scanned the whole table -- unnoticed at 236
+        # tenders, a statement timeout at 3,918.
+        done += [f"+index {i}" for i in missing_indexes]
 
         if conn.is_pg:
             for table in stale_fts:
@@ -818,7 +833,17 @@ def rebuild_fts(conn: Connection) -> None:
 
 # --- run bookkeeping ---------------------------------------------------------
 
+STALE_RUN_HOURS = 6      # longer than any job's timeout (340 min)
+
+
 def start_run(conn: Connection, mode: str) -> int:
+    # A run killed from outside (a timeout, a crash past its own handlers)
+    # never reaches finish_run and would read "running" for ever -- on the
+    # site too. Nothing legitimately runs this long, so close such rows off.
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=STALE_RUN_HOURS)
+              ).isoformat(timespec="seconds")
+    conn.execute("UPDATE run_log SET status='abandoned', finished_at=?"
+                 " WHERE status='running' AND started_at < ?", (now(), cutoff))
     run_id = conn.insert_returning_id(
         "INSERT INTO run_log(mode, started_at, status) VALUES (?,?,'running')",
         (mode, now()), pk="run_id")
