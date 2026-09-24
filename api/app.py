@@ -150,7 +150,10 @@ def api_stats() -> dict:
             AND (days_to_deadline IS NULL OR days_to_deadline>=0)) AS open_tenders,
         (SELECT COUNT(*) FROM tender_items)                     AS items,
         (SELECT COUNT(DISTINCT nupco_code) FROM tender_items
-            WHERE nupco_code IS NOT NULL)                       AS codes,
+            WHERE nupco_code IS NOT NULL)
+          + (SELECT COUNT(DISTINCT rdl_code) FROM tender_items
+            WHERE rdl_code IS NOT NULL)                         AS codes,
+        (SELECT COUNT(*) FROM awards)                           AS award_lines,
         (SELECT COUNT(*) FROM attachments WHERE is_current=1)   AS files,
         (SELECT COUNT(*) FROM attachments WHERE parse_status='failed') AS parse_failed,
         (SELECT COUNT(*) FROM tender_history)                   AS changes
@@ -162,6 +165,11 @@ def api_stats() -> dict:
     s["by_status"] = rows(
         "SELECT COALESCE(status_label,'(none)') AS label, COUNT(*) AS n"
         " FROM tenders GROUP BY status_label ORDER BY n DESC")
+    s["by_country"] = rows(
+        "SELECT COALESCE(country,'SA') AS country, COUNT(*) AS tenders,"
+        " SUM(CASE WHEN is_terminal=0 AND (days_to_deadline IS NULL OR days_to_deadline>=0)"
+        " THEN 1 ELSE 0 END) AS open_tenders"
+        " FROM tenders GROUP BY COALESCE(country,'SA') ORDER BY 1 DESC")
     s["engine"] = "postgres" if db.IS_POSTGRES else "sqlite"
     return s
 
@@ -185,6 +193,10 @@ def api_search(p: dict) -> dict:
                      " OR t.days_to_deadline >= 0)")
     if p.get("hide_accessories", ["0"])[0] == "1":
         where.append("i.is_accessory = 0")
+    country = (p.get("country", [""])[0] or "").upper()
+    if country in COUNTRIES:
+        where.append("COALESCE(t.country, 'SA') = ?")
+        args.append(country)
 
     if mode == "tenders":
         return _search_tenders(q, where, args, limit, offset, sort)
@@ -213,8 +225,10 @@ def api_search(p: dict) -> dict:
     data = rows(
         "SELECT i.id, i.tender_id, i.post_id, i.nupco_code, i.description, i.uom,"
         " i.qty, i.category_guess, i.is_accessory, i.item_no, i.item_group,"
-        " t.title_en, t.status_label, t.submission_ts, t.opening_ts,"
+        " i.generic_name, i.rdl_code,"
+        " t.title_en, t.title_ar, t.status_label, t.submission_ts, t.opening_ts,"
         " t.days_to_deadline, t.url, t.booklet_price_sar,"
+        " COALESCE(t.country, 'SA') AS country, t.buyer,"
         " a.id AS attachment_id, a.filename, a.url AS file_url "
         + base + clause + order + " LIMIT ? OFFSET ?",
         args + rank_args + [limit, offset])
@@ -247,7 +261,8 @@ def _search_tenders(q, where, args, limit, offset, sort) -> dict:
         "SELECT t.post_id, t.tender_id, t.title_en, t.title_ar, t.status_label,"
         " t.category_guess, t.opening_ts, t.submission_ts, t.days_to_deadline,"
         " t.booklet_price_sar, t.item_count, t.total_qty, t.attachment_count,"
-        " t.url, t.is_listed, t.is_terminal "
+        " t.url, t.is_listed, t.is_terminal,"
+        " COALESCE(t.country, 'SA') AS country, t.buyer, t.subcategory, t.method "
         + base + clause + order + " LIMIT ? OFFSET ?",
         args + rank_args + [limit, offset])
     return {"mode": "tenders", "total": total, "limit": limit, "offset": offset,
@@ -302,6 +317,9 @@ def api_tender(post_id: int) -> dict:
         "SELECT field, old_value, new_value, change_kind, changed_at"
         " FROM tender_history WHERE post_id=? ORDER BY changed_at DESC LIMIT 100",
         (post_id,))
+    t["awards"] = rows(
+        "SELECT * FROM awards WHERE post_id=? ORDER BY award_no, item_no, beneficiary",
+        (post_id,))
     return t
 
 
@@ -317,6 +335,90 @@ def api_code(code: str) -> dict:
             " JOIN tenders t ON t.post_id=i.post_id"
             " WHERE i.nupco_code=? ORDER BY t.submission_ts DESC", (code,)),
     }
+
+
+COUNTRIES = {"SA", "JO"}
+
+AWARD_SORTS = {
+    "date_desc":  "a.published_at IS NULL, a.published_at DESC, a.id DESC",
+    "date_asc":   "a.published_at IS NULL, a.published_at ASC,  a.id",
+    "cost_asc":   "a.unit_cost IS NULL, a.unit_cost ASC, a.id",
+    "cost_desc":  "a.unit_cost IS NULL, a.unit_cost DESC, a.id",
+    "value_desc": "a.total_value IS NULL, a.total_value DESC, a.id",
+}
+
+
+def _median(xs: list[float]) -> float | None:
+    xs = sorted(x for x in xs if x is not None)
+    if not xs:
+        return None
+    m = len(xs) // 2
+    return xs[m] if len(xs) % 2 else (xs[m - 1] + xs[m]) / 2
+
+
+def api_awards(p: dict) -> dict:
+    """Awarded lines: who won, what brand, from where, at what price.
+
+    The comparable figure is unit_cost -- total value over awarded quantity,
+    so per tablet or vial with free goods netted out -- and it is only
+    comparable within one product. So results come back two ways: the lines
+    themselves, and a summary per RDL product code (min, median, max unit
+    cost). A price range across '850 mg' and '500 mg' tablets would be
+    arithmetic without meaning, so no summary ever mixes products.
+
+    Tax is not normalised: a tax-exempt price is not made comparable by
+    guessing the rate, so each line says which it is and the summary counts
+    how many of each it contains.
+    """
+    q = (p.get("q", [""])[0] or "").strip()
+    limit = min(int(p.get("limit", ["200"])[0] or 200), 1000)
+    order = AWARD_SORTS.get(p.get("sort", ["date_desc"])[0], AWARD_SORTS["date_desc"])
+    like = "ILIKE" if db.IS_POSTGRES else "LIKE"      # SQLite LIKE is case-blind for ASCII
+
+    where, args = [], []
+    for tok in re.findall(r"[\w\u0600-\u06FF.%+/-]+", q)[:8]:
+        term = f"%{tok}%"
+        bare = re.sub(r"[-\s]", "", tok)          # RDL codes are stored without dashes
+        code = f"%{bare}%"
+        where.append(f"(a.scientific_name {like} ? OR a.brand {like} ? OR a.manufacturer {like} ?"
+                     f" OR a.supplier {like} ? OR a.rdl_code {like} ? OR a.tender_id {like} ?)")
+        args += [term, term, term, term, code, term]
+    if p.get("year", [""])[0]:
+        where.append("a.published_at LIKE ?")
+        args.append(p["year"][0] + "%")
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+
+    lines = rows(
+        "SELECT a.*, t.title_ar, t.url FROM awards a"
+        " LEFT JOIN tenders t ON t.post_id = a.post_id"
+        + clause + f" ORDER BY {order} LIMIT ?", args + [limit])
+    total = (one(f"SELECT COUNT(*) AS n FROM awards a{clause}", args) or {}).get("n", 0)
+
+    groups: dict = {}
+    for r in rows(f"SELECT a.rdl_code, a.scientific_name, a.unit_cost, a.currency,"
+                  f" a.price_incl_tax, a.manufacturer, a.published_at, a.awarded_qty,"
+                  f" a.total_value FROM awards a{clause}", args):
+        key = r["rdl_code"] or r["scientific_name"]
+        g = groups.setdefault(key, {"rdl_code": r["rdl_code"], "name": r["scientific_name"],
+                                    "currency": r["currency"], "costs": [], "makers": set(),
+                                    "lines": 0, "incl_tax": 0, "excl_tax": 0, "qty": 0.0,
+                                    "value": 0.0, "latest": None})
+        g["lines"] += 1
+        g["costs"].append(r["unit_cost"])
+        g["makers"].add(r["manufacturer"]) if r["manufacturer"] else None
+        g["incl_tax" if r["price_incl_tax"] == 1 else "excl_tax"] += 1
+        g["qty"] += r["awarded_qty"] or 0
+        g["value"] += r["total_value"] or 0
+        g["latest"] = max(filter(None, [g["latest"], r["published_at"]]), default=None)
+    products = []
+    for g in groups.values():
+        costs = [c for c in g.pop("costs") if c is not None]
+        g["makers"] = sorted(g["makers"])
+        g.update(min_cost=min(costs, default=None), max_cost=max(costs, default=None),
+                 median_cost=_median(costs))
+        products.append(g)
+    products.sort(key=lambda g: (-g["lines"], g["name"] or ""))
+    return {"total": total, "results": lines, "products": products[:100]}
 
 
 def api_changes(p: dict) -> dict:
@@ -382,6 +484,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(api_stats())
             if path == "/api/search":
                 return self._json(api_search(p))
+            if path == "/api/awards":
+                return self._json(api_awards(p))
             if path == "/api/catalog":
                 return self._json(api_catalog(p))
             if path == "/api/changes":
@@ -451,10 +555,34 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"error": "document not stored and no source url"}, 404)
 
 
+def _migrate_on_start() -> None:
+    """Bring the schema current before serving.
+
+    Only the pipeline ever ran init(), so a new API deployed ahead of the next
+    crawl would query columns and tables that do not exist yet. Migrating here
+    removes the ordering dependency. It is a no-op on a current schema, it
+    skips a database with no schema at all (so the "not configured" message
+    still appears), and a failure is logged rather than fatal: a stale schema
+    serves the old fields, which beats not serving.
+    """
+    try:
+        c = db.connect()
+        try:
+            if db.schema_exists(c):
+                done = db.migrate(c)
+                if done:
+                    print("  schema migrated: " + "; ".join(done), flush=True)
+        finally:
+            c.close()
+    except Exception as e:                      # noqa: BLE001
+        print(f"  schema migration skipped: {type(e).__name__}: {e}", flush=True)
+
+
 def main() -> int:
+    _migrate_on_start()
     engine = "Postgres" if db.IS_POSTGRES else f"SQLite ({C.DB_PATH})"
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"\n  NUPCO tender API  ->  http://{HOST}:{PORT}")
+    print(f"\n  Tender API (NUPCO + JONEPS)  ->  http://{HOST}:{PORT}")
     print(f"  database: {engine}")
     print("  press Ctrl+C to stop\n", flush=True)
     if "--open" in sys.argv:

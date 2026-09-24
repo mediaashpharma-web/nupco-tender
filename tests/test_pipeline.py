@@ -413,6 +413,130 @@ class TestSeed(unittest.TestCase):
             conn.close()
 
 
+class TestJoneps(unittest.TestCase):
+    """Jordan's portal: parsers against trimmed real pages, and the invariants
+    that let two sources share one database without damaging each other."""
+
+    FIX = ROOT / "tests" / "fixtures" / "joneps"
+
+    @classmethod
+    def setUpClass(cls):
+        from pipeline import joneps
+        cls.J = joneps
+
+    def test_keys_are_deterministic_namespaced_and_fit_bigint(self):
+        J = self.J
+        a, b = J.post_id_for("2024003580", "10"), J.post_id_for("2024003580", "11")
+        self.assertEqual(a, J.post_id_for("2024003580", "10"), "same tender, same key, every run")
+        self.assertNotEqual(a, b, "revisions of a tender are distinct tenders")
+        self.assertGreater(a, 10 ** 12, "must never collide with a NUPCO WordPress id")
+        self.assertLess(J.post_id_for("2099999999", "99"), 2 ** 63)
+
+    def test_count_uses_a_dot_as_thousands_separator(self):
+        html = (self.FIX / "list_page.html").read_text(encoding="utf-8")
+        self.assertEqual(self.J.parse_total(html), 1045, "'1.045' is one thousand and forty-five")
+        self.assertEqual(self.J.parse_pages(html), 11)
+
+    def test_list_rows(self):
+        rows = self.J.parse_list((self.FIX / "list_page.html").read_text(encoding="utf-8"))
+        self.assertEqual(len(rows), 10)
+        r = rows[0]
+        self.assertRegex(r["tend_no"], r"^\d{10}$")
+        self.assertRegex(r["published"] or "", r"^\d{4}-\d{2}-\d{2}$")
+        self.assertTrue(r["title"] and r["buyer"])
+
+    def test_list_crawl_terminates_when_the_server_clamps_pages(self):
+        """The server answers an out-of-range page with the LAST real page.
+        A result of exactly 100 rows must still stop after one request."""
+        J = self.J
+        html = (self.FIX / "list_page.html").read_text(encoding="utf-8")
+        rows = J.parse_list(html)
+        full = "".join(
+            f"<tr><td><a onclick=\"fn_goDetail('{2024000000 + i}','00','','EP1313','','EP0061','EP0021','EP0016');\">"
+            f"{2024000000 + i}-00</a></td><td>t</td><td>b</td><td>x</td><td>01/01/2024</td><td>02/01/2024</td></tr>"
+            for i in range(J.LIST_PAGE_SIZE))
+        page = f"<table>{full}</table>"                  # no page marker at all
+
+        class Clamping:
+            calls = 0
+            def list_page(self, n, **f):
+                Clamping.calls += 1
+                if Clamping.calls > 5:
+                    raise AssertionError("pagination loop did not terminate")
+                return page                               # same page, forever
+        got = J._crawl_list(Clamping())
+        self.assertEqual(len(got), J.LIST_PAGE_SIZE)
+        self.assertLessEqual(Clamping.calls, 2)
+        self.assertTrue(rows)
+
+    def test_goods_json_to_structured_drug_lines(self):
+        payload = json.loads((self.FIX / "mdgoods_imatinib.json").read_text(encoding="utf-8"))
+        it = self.J.parse_goods(payload)[0]
+        self.assertEqual(it["generic_name"], "Imatinib")
+        self.assertEqual(it["description"], "IMATINIB TABS/CAP 400 MG")
+        self.assertEqual(it["rdl_code"], "08030500025", "same canonical form as the award page")
+        self.assertEqual(it["unspsc"], "51112005")
+        self.assertEqual(it["code_group"], "51")
+        self.assertEqual(it["category_guess"], "pharma", "UNSPSC 51 shares NUPCO's pharma group")
+        self.assertEqual(it["qty"], 1080)
+        self.assertEqual(json.loads(it["demand_json"])[0]["abbr"], "PHH")
+
+    def test_award_single_line_hand_checked(self):
+        h, rows = self.J.parse_award((self.FIX / "award_single.html").read_text(encoding="utf-8"))
+        self.assertEqual(h["award_no"], "2025000694-000")
+        self.assertEqual(h["published_at"], "2025-04-24")
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertEqual(r["manufacturer"], "Deva Holding S.A")
+        self.assertEqual(r["unit_price"], 190.0)
+        self.assertEqual(r["awarded_qty"], 1080.0)
+        self.assertEqual(r["pack_size"], 30.0)
+        self.assertEqual(r["total_value"], 6840.0)
+        self.assertEqual(r["currency"], "JOD")
+        self.assertEqual(r["price_incl_tax"], 1)
+        # the comparable figure: cost per base unit, not per pack
+        self.assertAlmostEqual(r["unit_cost"], 6840 / 1080)
+
+    def test_award_multi_block_tax_is_read_per_table(self):
+        """Military hospitals buy tax-exempt on the same page as everyone else.
+        Reading the tax flag once per page would compare exempt and inclusive
+        prices as if they were the same thing."""
+        h, rows = self.J.parse_award((self.FIX / "award_multi.html").read_text(encoding="utf-8"))
+        self.assertEqual(len(rows), 26)
+        tropicamide = {r["beneficiary"]: r for r in rows if r["rdl_code"] == "11050100045"}
+        self.assertEqual(tropicamide["مديرية الخدمات الطبية الملكية"]["price_incl_tax"], 0)
+        self.assertEqual(tropicamide["وزارة الصحة"]["price_incl_tax"], 1)
+        for r in rows:
+            for f in ("supplier", "scientific_name", "unit_price", "total_value", "awarded_qty"):
+                self.assertIsNotNone(r.get(f), f"{f} missing on {r.get('scientific_name')}")
+            if r["pack_size"] and not r["free_qty_pct"]:
+                implied = r["unit_price"] * r["awarded_qty"] / r["pack_size"]
+                self.assertAlmostEqual(implied, r["total_value"], delta=r["total_value"] * 0.01)
+
+    def test_one_source_never_delists_the_other(self):
+        """Each crawler only sees its own portal. An unscoped delist sweep would
+        let the nightly Saudi run mark every Jordanian tender as gone."""
+        conn = fresh_db()
+        db.upsert_tender(conn, 1, tender(post_id=5, url="https://nupco/5/"))
+        jid = self.J.post_id_for("2024003580", "10")
+        db.upsert_tender(conn, 1, tender(post_id=jid, tender_id="2024003580-10",
+                                         url="https://joneps/x", source="joneps"))
+        conn.commit()
+        n = db.mark_unseen_as_delisted(conn, 2, seen_post_ids=[5], source="nupco")
+        self.assertEqual(n, 0)
+        row = conn.execute("SELECT is_listed FROM tenders WHERE post_id=?", (jid,)).fetchone()
+        self.assertEqual(row["is_listed"], 1)
+
+    def test_award_restore_replaces_never_duplicates(self):
+        conn = fresh_db()
+        h, rows = self.J.parse_award((self.FIX / "award_multi.html").read_text(encoding="utf-8"))
+        for _ in range(2):
+            self.J.store_award(conn, 7, "T-7", h, rows)
+        conn.commit()
+        n = conn.execute("SELECT COUNT(*) AS n FROM awards WHERE post_id=7").fetchone()["n"]
+        self.assertEqual(n, 26)
+
+
 class TestRealDatabase(unittest.TestCase):
     """Skipped automatically until the pipeline has produced a database."""
 

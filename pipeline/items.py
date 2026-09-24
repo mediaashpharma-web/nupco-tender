@@ -503,11 +503,16 @@ def store_items(conn, attachment_id: int, post_id: int, tender_id: str,
              it.get("qty"), it.get("qty_raw"), it.get("item_group"),
              it.get("itemized"), it.get("category_guess"), it.get("code_group"),
              it.get("is_accessory", 0),
-             it.get("source_page"), it.get("row_index"), it.get("raw_row"))
+             it.get("source_page"), it.get("row_index"), it.get("raw_row"),
+             # Structured drug identity: JONEPS publishes it as fields, NUPCO's
+             # parsed PDFs do not, so these stay NULL for NUPCO rows.
+             it.get("generic_name"), it.get("generic_name_ar"), it.get("rdl_code"),
+             it.get("unspsc"), it.get("demand_json"))
             for it in items]
     conn.executemany(
         "INSERT INTO tender_items(attachment_id, post_id, tender_id, sn, item_no,"
         " nupco_code, description, uom, qty, qty_raw, item_group, itemized,"
-        " category_guess, code_group, is_accessory, source_page, row_index, raw_row)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+        " category_guess, code_group, is_accessory, source_page, row_index, raw_row,"
+        " generic_name, generic_name_ar, rdl_code, unspsc, demand_json)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
     return len(rows)

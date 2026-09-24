@@ -73,7 +73,8 @@ def discover(conn) -> tuple[dict[int, dict], dict[str, str | None], list[str]]:
 def _known(conn) -> dict:
     rows = conn.execute(
         "SELECT post_id, url, is_terminal, detail_fetched_at, sitemap_lastmod,"
-        " status_slugs, submission_deadline FROM tenders").fetchall()
+        " status_slugs, submission_deadline FROM tenders"
+        " WHERE COALESCE(source, 'nupco') = 'nupco'").fetchall()
     return {r["post_id"]: dict(r) for r in rows}
 
 

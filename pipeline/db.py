@@ -82,12 +82,18 @@ CREATE TABLE IF NOT EXISTS tenders (
     content_hash        TEXT,
     first_seen_at       TEXT,
     last_seen_at        TEXT,
-    last_changed_at     TEXT
+    last_changed_at     TEXT,
+    source              TEXT DEFAULT 'nupco',
+    country             TEXT DEFAULT 'SA',
+    subcategory         TEXT,
+    buyer               TEXT,
+    method              TEXT,
+    fiscal_year         INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS tender_history (
     id          {pk_serial},
-    post_id     INTEGER,
+    post_id     BIGINT,
     tender_id   TEXT,
     field       TEXT,
     old_value   TEXT,
@@ -99,7 +105,7 @@ CREATE TABLE IF NOT EXISTS tender_history (
 
 CREATE TABLE IF NOT EXISTS attachments (
     id                 {pk_serial},
-    post_id            INTEGER,
+    post_id            BIGINT,
     tender_id          TEXT,
     role               TEXT,
     url                TEXT,
@@ -122,7 +128,7 @@ CREATE TABLE IF NOT EXISTS attachments (
 CREATE TABLE IF NOT EXISTS tender_items (
     id             {pk_serial},
     attachment_id  INTEGER,
-    post_id        INTEGER,
+    post_id        BIGINT,
     tender_id      TEXT,
     sn             TEXT,
     item_no        TEXT,
@@ -138,7 +144,12 @@ CREATE TABLE IF NOT EXISTS tender_items (
     is_accessory   INTEGER DEFAULT 0,
     source_page    INTEGER,
     row_index      INTEGER,
-    raw_row        TEXT
+    raw_row        TEXT,
+    generic_name    TEXT,
+    generic_name_ar TEXT,
+    rdl_code        TEXT,
+    unspsc          TEXT,
+    demand_json     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS parse_failures (
@@ -168,6 +179,47 @@ CREATE TABLE IF NOT EXISTS run_log (
     notes           TEXT
 );
 
+CREATE TABLE IF NOT EXISTS awards (
+    id               {pk_serial},
+    source           TEXT,
+    post_id          BIGINT,
+    tender_id        TEXT,
+    award_no         TEXT,
+    award_status     TEXT,
+    published_at     TEXT,
+    buyer            TEXT,
+    beneficiary_code TEXT,
+    beneficiary      TEXT,
+    supplier_no      TEXT,
+    supplier         TEXT,
+    supplier_country TEXT,
+    po_no            TEXT,
+    item_no          TEXT,
+    unspsc           TEXT,
+    rdl_code         TEXT,
+    scientific_name  TEXT,
+    brand            TEXT,
+    manufacturer     TEXT,
+    origin_country   TEXT,
+    registration     TEXT,
+    shelf_life       TEXT,
+    pack             TEXT,
+    pack_size        {real},
+    unit_size        TEXT,
+    free_qty_pct     {real},
+    discount_pct     {real},
+    awarded_qty      {real},
+    unit_price       {real},
+    price_incl_tax   INTEGER,
+    total_value      {real},
+    currency         TEXT,
+    unit_cost        {real},
+    award_reason     TEXT,
+    conditions       TEXT,
+    first_seen_at    TEXT,
+    last_seen_at     TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_tenders_tid    ON tenders(tender_id);
 CREATE INDEX IF NOT EXISTS idx_tenders_status ON tenders(status_label);
 CREATE INDEX IF NOT EXISTS idx_tenders_sub    ON tenders(submission_ts);
@@ -180,6 +232,11 @@ CREATE INDEX IF NOT EXISTS idx_items_att      ON tender_items(attachment_id);
 CREATE INDEX IF NOT EXISTS idx_items_code     ON tender_items(nupco_code);
 CREATE INDEX IF NOT EXISTS idx_items_tid      ON tender_items(tender_id);
 CREATE INDEX IF NOT EXISTS idx_items_cat      ON tender_items(category_guess);
+CREATE INDEX IF NOT EXISTS idx_tenders_source ON tenders(source);
+CREATE INDEX IF NOT EXISTS idx_items_rdl      ON tender_items(rdl_code);
+CREATE INDEX IF NOT EXISTS idx_awards_post    ON awards(post_id, award_no);
+CREATE INDEX IF NOT EXISTS idx_awards_rdl     ON awards(rdl_code);
+CREATE INDEX IF NOT EXISTS idx_awards_pub     ON awards(published_at);
 """
 
 _VIEWS = """
@@ -219,16 +276,20 @@ LEFT JOIN tenders t ON t.post_id = h.post_id;
 # SQLite full-text: FTS5 external-content tables kept in step by triggers.
 _SQLITE_FTS = """
 CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
-    description, nupco_code, item_no, tender_id,
+    description, nupco_code, item_no, tender_id, generic_name, generic_name_ar, rdl_code,
     content='tender_items', content_rowid='id', tokenize='porter unicode61'
 );
 CREATE TRIGGER IF NOT EXISTS items_ai AFTER INSERT ON tender_items BEGIN
-    INSERT INTO items_fts(rowid, description, nupco_code, item_no, tender_id)
-    VALUES (new.id, new.description, new.nupco_code, new.item_no, new.tender_id);
+    INSERT INTO items_fts(rowid, description, nupco_code, item_no, tender_id,
+                          generic_name, generic_name_ar, rdl_code)
+    VALUES (new.id, new.description, new.nupco_code, new.item_no, new.tender_id,
+            new.generic_name, new.generic_name_ar, new.rdl_code);
 END;
 CREATE TRIGGER IF NOT EXISTS items_ad AFTER DELETE ON tender_items BEGIN
-    INSERT INTO items_fts(items_fts, rowid, description, nupco_code, item_no, tender_id)
-    VALUES ('delete', old.id, old.description, old.nupco_code, old.item_no, old.tender_id);
+    INSERT INTO items_fts(items_fts, rowid, description, nupco_code, item_no, tender_id,
+                          generic_name, generic_name_ar, rdl_code)
+    VALUES ('delete', old.id, old.description, old.nupco_code, old.item_no, old.tender_id,
+            old.generic_name, old.generic_name_ar, old.rdl_code);
 END;
 CREATE VIRTUAL TABLE IF NOT EXISTS tenders_fts USING fts5(
     title_en, title_ar, tender_id,
@@ -257,7 +318,9 @@ ALTER TABLE tender_items ADD COLUMN IF NOT EXISTS search_vector tsvector
     GENERATED ALWAYS AS (to_tsvector('english',
         coalesce(description,'') || ' ' || coalesce(nupco_code,'') || ' '
         || coalesce(item_no,'') || ' ' || coalesce(tender_id,'') || ' '
-        || replace(coalesce(tender_id,''), '/', ' '))) STORED;
+        || replace(coalesce(tender_id,''), '/', ' ') || ' '
+        || coalesce(generic_name,'') || ' ' || coalesce(generic_name_ar,'') || ' '
+        || coalesce(rdl_code,''))) STORED;
 CREATE INDEX IF NOT EXISTS idx_items_search ON tender_items USING GIN(search_vector);
 
 ALTER TABLE tenders ADD COLUMN IF NOT EXISTS search_vector tsvector
@@ -323,6 +386,9 @@ TENDER_TRACKED_FIELDS = [
     "tender_id", "title_en", "title_ar", "status_label", "status_slugs",
     "opening_date", "submission_deadline", "bid_opening", "booklet_price_sar",
     "buy_url", "url", "item_count", "category_guess",
+    # Only JONEPS sets these; a field absent from a record is skipped, so
+    # tracking them changes nothing for NUPCO.
+    "subcategory", "buyer", "method",
 ]
 
 
@@ -501,7 +567,20 @@ def set_journal_mode(conn: Connection, path=None) -> str:
     return "unknown"
 
 
-ADDED_COLUMNS = [("tender_items", "code_group", "TEXT")]
+ADDED_COLUMNS = [
+    ("tender_items", "code_group",      "TEXT"),
+    ("tenders",      "source",          "TEXT DEFAULT 'nupco'"),
+    ("tenders",      "country",         "TEXT DEFAULT 'SA'"),
+    ("tenders",      "subcategory",     "TEXT"),
+    ("tenders",      "buyer",           "TEXT"),
+    ("tenders",      "method",          "TEXT"),
+    ("tenders",      "fiscal_year",     "INTEGER"),
+    ("tender_items", "generic_name",    "TEXT"),
+    ("tender_items", "generic_name_ar", "TEXT"),
+    ("tender_items", "rdl_code",        "TEXT"),
+    ("tender_items", "unspsc",          "TEXT"),
+    ("tender_items", "demand_json",     "TEXT"),
+]
 
 
 def schema_exists(conn: Connection) -> bool:
@@ -523,8 +602,8 @@ def init(conn: Connection, path=None, force: bool = False) -> str:
     """
     mode = set_journal_mode(conn, path)
     if not force and schema_exists(conn):
-        # Cheap catalog read; only does work when the definition actually moved.
-        migrate_fts(conn)
+        # Cheap catalog reads; only does work when the schema actually moved.
+        migrate(conn)
         return mode
     for statement in schema_sql(conn.is_pg):
         try:
@@ -536,8 +615,7 @@ def init(conn: Connection, path=None, force: bool = False) -> str:
             # "already exists" race we would rather log than crash on.
             if "already exists" not in str(e).lower():
                 raise
-    _add_missing_columns(conn)
-    migrate_fts(conn)
+    migrate(conn)
     _migrate_absolute_paths(conn)
     conn.commit()
     return mode
@@ -545,9 +623,18 @@ def init(conn: Connection, path=None, force: bool = False) -> str:
 
 # Present only in the corrected definition above, so its absence identifies a
 # database still carrying the old one.
-_FTS_MARKER = "replace"
+# A token present only in each table's CURRENT search-vector definition, so its
+# absence identifies a database still carrying an older one.
+_FTS_MARKERS = {"tender_items": "generic_name", "tenders": "replace"}
+
+# Child tables that once declared post_id as INTEGER. That is 32-bit in
+# Postgres, which a JONEPS key cannot fit, while tenders.post_id was always
+# BIGINT -- the parent and its children disagreed and NUPCO's small WordPress
+# ids simply never exposed it.
+_BIGINT_POST_ID = ("tender_history", "attachments", "tender_items")
 
 _IS_VIEW = re.compile(r"\s*CREATE (OR REPLACE )?VIEW", re.I)
+_IS_CREATE = re.compile(r"\s*CREATE (TABLE|INDEX|UNIQUE INDEX) IF NOT EXISTS", re.I)
 
 
 def _view_names() -> list[str]:
@@ -559,55 +646,122 @@ def _pg_fts_is_current(conn: Connection, table: str) -> bool:
     row = conn.execute(
         "SELECT generation_expression AS e FROM information_schema.columns"
         " WHERE table_name=? AND column_name='search_vector'", (table,)).fetchone()
-    return bool(row and row["e"] and _FTS_MARKER in row["e"])
+    return bool(row and row["e"] and _FTS_MARKERS[table] in row["e"])
 
 
-def migrate_fts(conn: Connection) -> bool:
-    """Rebuild the Postgres search vectors when their definition has changed.
+def _pg_narrow_post_ids(conn: Connection) -> list[str]:
+    rows = conn.execute(
+        "SELECT table_name AS t FROM information_schema.columns"
+        " WHERE column_name='post_id' AND data_type='integer'").fetchall()
+    return [r["t"] for r in rows if r["t"] in _BIGINT_POST_ID]
 
-    A generated column cannot be altered in place and ADD COLUMN IF NOT EXISTS
-    quietly does nothing when one is already there, so a database created
-    before the definition changed would keep the old, broken index forever.
-    Dropping and re-adding is cheap here: the column is derived, so no source
-    data is touched and nothing can be lost.
+
+def _missing_columns(conn: Connection) -> list[tuple[str, str, str]]:
+    out = []
+    for table, column, decl in ADDED_COLUMNS:
+        existing = table_columns(conn, table)
+        if existing and column not in existing:
+            out.append((table, column, decl))
+    return out
+
+
+def _missing_tables(conn: Connection) -> list[str]:
+    wanted = re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", _COMMON_TABLES)
+    return [t for t in wanted if not table_columns(conn, t)]
+
+
+def _sqlite_fts_is_current(conn: Connection) -> bool:
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(items_fts)").fetchall()}
+    return not cols or "generic_name" in cols        # absent means "create fresh"
+
+
+def migrate(conn: Connection) -> list[str]:
+    """Bring an existing database up to the current schema, in one pass.
+
+    Runs on every start, including the fast path in init(). Each step reads the
+    catalog before doing anything, so a database that is already current pays
+    a handful of metadata queries and nothing else.
+
+    Why this exists at all: CREATE TABLE IF NOT EXISTS and ADD COLUMN IF NOT
+    EXISTS both succeed silently against an object that is already there, so a
+    database built before a schema change keeps the old shape forever. That is
+    how the search index stayed broken after its definition was fixed, and how
+    new columns would never have reached the live database, because init()
+    only ever added them on the path that builds a schema from nothing.
     """
-    if not conn.is_pg:
-        return False                 # SQLite rebuilds its FTS tables instead
-    stale = [t for t in ("tender_items", "tenders")
-             if not _pg_fts_is_current(conn, t)]
-    if not stale:
-        return False
-    log.info("search index is out of date for %s, rebuilding", ", ".join(stale))
+    done: list[str] = []
+    narrow = _pg_narrow_post_ids(conn) if conn.is_pg else []
+    missing_cols = _missing_columns(conn)
+    missing_tables = _missing_tables(conn)
+    stale_fts = ([t for t in _FTS_MARKERS if not _pg_fts_is_current(conn, t)]
+                 if conn.is_pg else ([] if _sqlite_fts_is_current(conn) else ["items_fts"]))
+    if not (narrow or missing_cols or missing_tables or stale_fts):
+        return done
 
-    statements = schema_sql(is_pg=True)
+    statements = schema_sql(conn.is_pg)
+    creates = [x for x in statements if _IS_CREATE.match(x) and "search_vector" not in x]
     view_sql = [x for x in statements if _IS_VIEW.match(x)]
-    fts_sql = [x for x in statements if "search_vector" in x]
 
-    # Fail fast rather than queue behind a reader: the API holds connections
-    # open, and an ACCESS EXCLUSIVE lock waiting on one would hang the run.
-    conn.execute("SET lock_timeout = '30s'")
+    if conn.is_pg:
+        # Fail fast rather than queue behind a reader: the API holds
+        # connections open, and an ACCESS EXCLUSIVE lock waiting on one would
+        # hang the run instead of failing it.
+        conn.execute("SET lock_timeout = '30s'")
     try:
-        # v_current_items selects i.*, so it carries search_vector and pins the
-        # column in place. CREATE OR REPLACE VIEW cannot help -- it refuses to
-        # change a view's column list -- so the views come down and go back up
-        # around the change. They are derived, so this loses nothing, but it
-        # does mean a few seconds where the API cannot read them.
-        for name in reversed(_view_names()):
-            conn.execute(f"DROP VIEW IF EXISTS {name} CASCADE")
-        for table in stale:
-            conn.execute(f"ALTER TABLE {table} DROP COLUMN IF EXISTS search_vector")
-        for statement in fts_sql + view_sql:
+        # v_current_items selects i.*, so it pins every column of tender_items,
+        # search_vector included: no type change, no new column in the view,
+        # no rebuilt index without it coming down first. CREATE OR REPLACE
+        # VIEW refuses to change a view's column list, so the views come down
+        # once and go back up once, around everything else. They are derived;
+        # nothing is lost, the API just cannot read them for a few seconds.
+        # Never CASCADE a column drop instead: that removes the views for good.
+        if conn.is_pg:
+            for name in reversed(_view_names()):
+                conn.execute(f"DROP VIEW IF EXISTS {name} CASCADE")
+        for table in narrow:
+            conn.execute(f"ALTER TABLE {table} ALTER COLUMN post_id TYPE BIGINT")
+            done.append(f"{table}.post_id -> BIGINT")
+        for table, column, decl in missing_cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+            done.append(f"+{table}.{column}")
+        for statement in creates:                  # new tables, then indexes
             conn.execute(statement)
+        done += [f"+table {t}" for t in missing_tables]
+
+        if conn.is_pg:
+            for table in stale_fts:
+                conn.execute(f"ALTER TABLE {table} DROP COLUMN IF EXISTS search_vector")
+            for statement in [x for x in statements if "search_vector" in x]:
+                conn.execute(statement)
+            for statement in view_sql:
+                conn.execute(statement)
+        elif stale_fts:
+            # SQLite keeps FTS in an external-content table: rebuilding it from
+            # tender_items loses nothing and picks up the new columns.
+            for trig in ("items_ai", "items_ad", "items_au"):
+                conn.execute(f"DROP TRIGGER IF EXISTS {trig}")
+            conn.execute("DROP TABLE IF EXISTS items_fts")
+            for statement in _split(_SQLITE_FTS):
+                if "items_fts" in statement or "items_a" in statement:
+                    conn.execute(statement)
+            conn.execute("INSERT INTO items_fts(items_fts) VALUES('rebuild')")
+        done += [f"search index {t}" for t in stale_fts]
         conn.commit()
     except Exception:                           # noqa: BLE001
         conn.rollback()
-        log.error("search index rebuild failed; the old index is still in place")
+        log.error("schema migration failed and was rolled back; nothing changed")
         raise
     finally:
-        conn.execute("SET lock_timeout = DEFAULT")
-        conn.commit()
-    log.info("search index rebuilt")
-    return True
+        if conn.is_pg:
+            conn.execute("SET lock_timeout = DEFAULT")
+            conn.commit()
+    log.info("schema migrated: %s", "; ".join(done))
+    return done
+
+
+def migrate_fts(conn: Connection) -> bool:
+    """Kept for callers of the earlier, search-index-only migration."""
+    return bool(migrate(conn))
 
 
 def table_columns(conn: Connection, table: str) -> set:
@@ -759,15 +913,20 @@ def _norm(v):
 
 
 def mark_unseen_as_delisted(conn: Connection, run_id: int,
-                            seen_post_ids: Iterable[int]) -> int:
+                            seen_post_ids: Iterable[int], source: str = "nupco") -> int:
     """A tender that vanished from discovery is delisted, never deleted.
 
     Guarded by the caller: this must not run after a partial crawl.
+
+    Scoped to one source. Each crawler only sees its own portal, so an unscoped
+    sweep would treat every tender from the other source as vanished: the
+    nightly NUPCO run would delist all of Jordan, and log each as a change.
     """
     seen = set(seen_post_ids)
     n = 0
     rows = conn.execute(
-        "SELECT post_id, tender_id FROM tenders WHERE is_listed=1").fetchall()
+        "SELECT post_id, tender_id FROM tenders WHERE is_listed=1"
+        " AND COALESCE(source, 'nupco') = ?", (source,)).fetchall()
     for row in rows:
         if row["post_id"] not in seen:
             conn.execute("UPDATE tenders SET is_listed=0, last_changed_at=? WHERE post_id=?",

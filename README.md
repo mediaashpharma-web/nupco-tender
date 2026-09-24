@@ -1,8 +1,16 @@
-# NUPCO tender pipeline
+# Tender pipeline — Saudi Arabia and Jordan
 
-Monitors Saudi NUPCO's public tender portal: crawls every tender, versions the
-attached documents, parses the Tender Item Lists into searchable line items,
-records every change over time, and serves it as a searchable web app.
+Monitors two public procurement portals and serves them as one searchable
+platform:
+
+* **Saudi Arabia — NUPCO.** Crawls every tender, versions the attached
+  documents, parses the Tender Item Lists into searchable line items.
+* **Jordan — JONEPS.** Every medicine tender since 2018, its drug lines as
+  structured data (INN name, strength, RDL code, UNSPSC, demand per hospital)
+  and, for awarded tenders, **what was actually paid**: supplier, brand,
+  manufacturer, country of origin, pack, unit price, total value.
+
+Every change to every tender is recorded over time.
 
 Runs itself daily, for free.
 
@@ -28,6 +36,33 @@ Each piece is where it is for a reason, not by preference:
   in them. Change detection compares hashes, so nothing is lost, and the UI
   links to the file on nupco.com.
 
+## Two sources, one database
+
+Tenders from both portals share the same tables, told apart by `source`
+(`nupco`, `joneps`) and `country` (`SA`, `JO`). Search spans both, with a
+country filter. What differs is kept honest rather than forced into shape:
+
+* **Only Jordan publishes award prices**, so the `awards` table and the
+  *Awards & prices* tab are Jordan-only. NUPCO publishes no prices.
+* **Jordan publishes drug identity as data** — INN name, RDL code, UNSPSC —
+  where NUPCO's has to be parsed out of PDFs. Both share the UNSPSC-derived
+  category groups (51 is pharmaceuticals in both).
+* **Each crawler is scoped to its own source.** A tender a crawler does not
+  see is marked unlisted, but only among its own source's tenders; otherwise
+  the nightly Saudi run would delist all of Jordan.
+
+`docs/SITE-NOTES-JONEPS.md` documents how JONEPS works and the traps in it.
+
+### Reading award prices
+
+Compare **`unit_cost`**, not `unit_price`. JONEPS publishes the price per pack
+and the quantity in base units, with free goods netted out of the total, so
+`unit_cost = total_value / awarded_qty` is the cost per tablet or vial. The
+*Awards* tab only ever shows a price range within one RDL product, never
+across strengths. Tax basis is recorded per line (`price_incl_tax`): military
+hospitals buy tax-exempt, so a lower price there is not necessarily a better
+deal.
+
 ## Local development
 
 ```bash
@@ -49,6 +84,8 @@ python -m pipeline.run reparse         re-parse stored files, no downloads
 python -m pipeline.run reclassify      re-apply category rules, no re-parse
 python -m pipeline.run fetch-missing   re-download documents absent from disk
 python -m pipeline.run seed            load seed/nupco-seed.db.gz wholesale
+python -m pipeline.joneps backfill     Jordan, every year since 2018 (--years to limit)
+python -m pipeline.joneps incremental  Jordan, the last two fiscal years
 python -m pipeline.report              markdown digest of the last run
 python -m tests.test_pipeline          34 tests, no network needed
 ```
@@ -120,6 +157,16 @@ places, both set by hand and never committed:
 
 * GitHub → Settings → Secrets and variables → Actions → `DATABASE_URL`
 * Render → the service's Environment tab → `DATABASE_URL`
+
+**Loading Jordan.** Run the workflow with mode `jordan-backfill`. A full
+history is about 6,700 requests, 2.5-3 hours at a polite pace. It commits
+tender by tender and stops cleanly at a 300-minute budget; awarded tenders go
+first, so an interrupted run still has the prices. Re-run it to continue:
+finished tenders are skipped. Set `years` (e.g. `2024,2025`) to load in
+chunks. After that, the daily `incremental` covers both countries.
+
+**Seeding replaces everything, Jordan included.** The snapshot holds only
+NUPCO data; run the Jordan backfill again after any seed.
 
 **First load.** Run the workflow manually with mode `seed`. It loads a
 prepared snapshot of the whole database in well under a minute.

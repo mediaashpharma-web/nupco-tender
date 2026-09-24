@@ -11,6 +11,10 @@ way to fail. Seeding ships the finished rows instead and lets the daily
 incremental take over, which only ever parses the handful of item lists that
 actually changed.
 
+WARNING: this replaces EVERY source, Jordan included. The snapshot holds only
+NUPCO data, so a seed wipes the JONEPS tenders, drug lines and awards too; run
+the Jordan backfill again afterwards. It is a recovery tool, not a routine one.
+
 This is a *replace*, not a merge. The snapshot is treated as the whole truth:
 every table is emptied first, so a half-finished crawl cannot leave orphan rows
 behind to be mistaken for real data. It is therefore safe to re-run, and unsafe
@@ -40,7 +44,7 @@ DEFAULT_SNAPSHOT = C.ROOT / "seed" / "nupco-seed.db.gz"
 # Parents before children. tender_items and tender_history reference tenders;
 # parse_failures references attachments. Emptying runs in reverse.
 TABLES = ["run_log", "tenders", "attachments", "tender_items",
-          "tender_history", "parse_failures"]
+          "tender_history", "parse_failures", "awards"]
 
 # Columns the snapshot carries but the destination must not inherit.
 # local_path points at a filesystem that does not exist here: in cloud mode

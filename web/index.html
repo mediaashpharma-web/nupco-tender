@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NUPCO Tender Search</title>
+<title>Tender Search — Saudi Arabia &amp; Jordan</title>
 <style>
   :root{
     --bg:#f6f7f9; --panel:#fff; --line:#e3e6ea; --ink:#12151a; --muted:#6b7280;
@@ -93,6 +93,19 @@
   .x{cursor:pointer;font-size:22px;line-height:1;color:var(--muted);background:none;
      border:none;padding:0 4px}
   .ar{direction:rtl;text-align:right;font-size:13px}
+  .flag{display:inline-block;min-width:22px;padding:0 5px;border-radius:4px;font-size:10px;
+        font-weight:700;letter-spacing:.04em;text-align:center;border:1px solid var(--line);
+        color:var(--muted);vertical-align:1px;margin-right:4px}
+  .flag.JO{color:#b45309;border-color:#f3d7b0} .flag.SA{color:#047857;border-color:#b7e4d2}
+  .tax{font-size:10px;color:var(--muted);margin-left:3px}
+  .prods{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:10px;margin-bottom:14px}
+  .prod{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:10px 12px;
+        cursor:pointer}
+  .prod:hover{background:var(--hover)}
+  .prod .n{font-weight:600;font-size:13px;margin-bottom:6px}
+  .prod .range{font-variant-numeric:tabular-nums;font-size:13px}
+  .prod .range b{font-size:15px}
+  .note{font-size:12px;color:var(--muted);margin:0 0 10px}
   .spin{display:inline-block;width:12px;height:12px;border:2px solid var(--line);
         border-top-color:var(--accent);border-radius:50%;animation:s .7s linear infinite}
   @keyframes s{to{transform:rotate(360deg)}}
@@ -103,11 +116,12 @@
 <body>
 <header>
   <div class="top">
-    <div class="brand">nupco<span>·</span>tender search</div>
+    <div class="brand">tender<span>·</span>search <span class="sub" style="color:var(--muted);font-weight:400">SA · JO</span></div>
     <div class="stats" id="stats"><span class="spin"></span></div>
   </div>
   <div class="tabs">
     <div class="tab on" data-tab="items">Items &amp; drugs</div>
+    <div class="tab" data-tab="awards">Awards &amp; prices</div>
     <div class="tab" data-tab="catalog">Catalogue</div>
     <div class="tab" data-tab="tenders">Tenders</div>
     <div class="tab" data-tab="changes">Changes</div>
@@ -117,6 +131,11 @@
 <main>
   <div class="bar">
     <input type="search" id="q" placeholder="Search a drug, device or tender…" autofocus>
+    <select id="country" title="Country">
+      <option value="">All countries</option>
+      <option value="SA">Saudi Arabia · NUPCO</option>
+      <option value="JO">Jordan · JONEPS</option>
+    </select>
     <select id="category">
       <option value="">All categories</option>
       <option value="pharma">Pharma</option><option value="device">Device</option>
@@ -171,6 +190,33 @@ const deadline = d => d==null ? '<span class="muted">—</span>'
   : d <= 7 ? `<span style="color:var(--warn);font-weight:600">${d}d left</span>`
   : `${d}d left`;
 
+const flag = c => `<span class="flag ${esc(c||'SA')}" title="${c==='JO'?'Jordan · JONEPS':'Saudi Arabia · NUPCO'}">${esc(c||'SA')}</span>`;
+const money = (v, cur, digits) => v==null ? '<span class="muted">—</span>'
+  : `${Number(v).toLocaleString(undefined,{maximumFractionDigits:digits??3})} ${esc(cur||'')}`;
+const taxTag = t => t===1 ? '<span class="tax">incl. tax</span>' : t===0 ? '<span class="tax">excl. tax</span>' : '';
+// Tender titles on JONEPS are published in Arabic only.
+const title = r => r.title_en || r.title_ar || '';
+
+// Items and tenders sort on dates and quantity; awards sort on price and value.
+const SORTS = {
+  default: [['relevance','Sort: best match'],['opening_desc','Sort: opening date, newest'],
+            ['opening_asc','Sort: opening date, oldest'],['deadline_asc','Sort: deadline, soonest'],
+            ['deadline_desc','Sort: deadline, latest'],['qty_desc','Sort: quantity, largest']],
+  awards:  [['date_desc','Sort: award date, newest'],['date_asc','Sort: award date, oldest'],
+            ['cost_asc','Sort: unit cost, lowest'],['cost_desc','Sort: unit cost, highest'],
+            ['value_desc','Sort: total value, largest']],
+};
+function setSorts(kind){
+  const sel = $('#sort'), keep = sel.value;
+  sel.innerHTML = SORTS[kind].map(([v,t]) => `<option value="${v}">${t}</option>`).join('');
+  sel.value = SORTS[kind].some(([v]) => v === keep) ? keep : SORTS[kind][0][0];
+  if (kind === 'default' && !$('#q').value.trim()){
+    const opt = sel.querySelector('option[value="relevance"]');
+    opt.disabled = true; opt.textContent = 'Sort: best match (type to search)';
+    if (sel.value === 'relevance') sel.value = 'opening_desc';
+  }
+}
+
 let state = {tab:'items', offset:0, limit:50, total:0};
 let timer = null;
 
@@ -186,11 +232,11 @@ async function loadStats(){
     const s = await get('/api/stats');
     const r = s.last_run || {};
     $('#stats').innerHTML = `
-      <span><b>${num(s.tenders)}</b> tenders</span>
-      <span><b>${num(s.open_tenders)}</b> open</span>
+      ${(s.by_country||[]).map(c => `<span>${flag(c.country)}<b>${num(c.tenders)}</b> tenders · ${num(c.open_tenders)} open</span>`).join('')
+        || `<span><b>${num(s.tenders)}</b> tenders</span><span><b>${num(s.open_tenders)}</b> open</span>`}
       <span><b>${num(s.items)}</b> line items</span>
       <span><b>${num(s.codes)}</b> distinct items</span>
-      <span><b>${num(s.files)}</b> files</span>
+      <span><b>${num(s.award_lines)}</b> priced award lines</span>
       <span title="${esc(r.finished_at||'')}">last run: <b>${esc(r.status||'—')}</b>
         ${r.finished_at ? esc(String(r.finished_at).slice(0,16).replace('T',' ')) : ''}</span>`;
     const sel = $('#status');
@@ -204,6 +250,7 @@ function params(){
   p.set('q', $('#q').value.trim());
   p.set('limit', state.limit); p.set('offset', state.offset);
   if ($('#category').value) p.set('category', $('#category').value);
+  if ($('#country').value)  p.set('country', $('#country').value);
   if ($('#status').value)   p.set('status', $('#status').value);
   if ($('#sort').value) p.set('sort', $('#sort').value);
   if ($('#open_only').checked) p.set('open_only','1');
@@ -218,9 +265,18 @@ async function load(){
   try{
     if (state.tab === 'changes'){
       renderChanges(await get('/api/changes?limit=300'));
+    } else if (state.tab === 'awards'){
+      const p = new URLSearchParams({q: $('#q').value.trim(), sort: $('#sort').value, limit: 300});
+      const data = await get('/api/awards?'+p);
+      state.total = data.total;
+      renderAwards(data);
     } else if (state.tab === 'catalog'){
-      const p = params(); p.delete('offset');
-      renderCatalog(await get('/api/catalog?'+p));
+      if ($('#country').value === 'JO'){
+        box.innerHTML = '<div class="empty"><p class="note">The catalogue groups Saudi items by NUPCO material code, so it has nothing to show for Jordan. Use <b>Items &amp; drugs</b>, or <b>Awards &amp; prices</b> to compare Jordanian products by RDL code.</p></div>';
+      } else {
+        const p = params(); p.delete('offset');
+        renderCatalog(await get('/api/catalog?'+p));
+      }
     } else {
       const p = params(); p.set('mode', state.tab);
       const data = await get('/api/search?'+p);
@@ -255,11 +311,13 @@ function renderItems(d){
     `<th>Item</th><th class="code">SAP code</th><th>Tender</th><th>Status</th>
      <th class="num">Qty</th><th>UOM</th><th>Opened</th><th>Deadline</th>`,
     d.results.map(r => `<tr onclick="openTender(${r.post_id})">
-      <td class="desc">${esc(r.description)}
+      <td class="desc">${flag(r.country)}${esc(r.description)}
+        ${r.generic_name && !String(r.description||'').toLowerCase().includes(String(r.generic_name).toLowerCase())
+          ? `<div class="sub">${esc(r.generic_name)}</div>` : ''}
         <div class="sub">${catPill(r.category_guess)}
           ${r.is_accessory ? '<span class="sub"> · accessory line</span>':''}</div></td>
       <td class="code">${esc(r.nupco_code)}</td>
-      <td><b>${esc(r.tender_id)}</b><div class="sub">${esc((r.title_en||'').slice(0,60))}</div></td>
+      <td><b>${esc(r.tender_id)}</b><div class="sub${r.title_en?'':' ar'}">${esc(title(r).slice(0,60))}</div></td>
       <td class="sub">${esc(r.status_label)}</td>
       <td class="num">${num(r.qty)}</td>
       <td class="sub">${esc(r.uom||'')}</td>
@@ -273,9 +331,10 @@ function renderTenders(d){
     `<th>Tender</th><th>Status</th><th>Category</th><th class="num">Items</th>
      <th class="num">Total qty</th><th class="num">Booklet SAR</th><th>Opens</th><th>Deadline</th>`,
     d.results.map(r => `<tr onclick="openTender(${r.post_id})">
-      <td class="desc"><b>${esc(r.tender_id)}</b>
+      <td class="desc">${flag(r.country)}<b>${esc(r.tender_id)}</b>
         ${r.is_listed ? '' : '<span class="sub"> · not listed</span>'}
-        <div class="sub">${esc((r.title_en||r.title_ar||'').slice(0,90))}</div></td>
+        <div class="sub${r.title_en?'':' ar'}">${esc(title(r).slice(0,90))}</div>
+        ${r.buyer||r.subcategory ? `<div class="sub">${esc([r.subcategory, r.buyer].filter(Boolean).join(' · '))}</div>` : ''}</td>
       <td class="sub">${esc(r.status_label)}</td>
       <td>${catPill(r.category_guess)}</td>
       <td class="num">${num(r.item_count)}</td>
@@ -284,6 +343,38 @@ function renderTenders(d){
       <td class="sub">${esc(r.opening_ts||'')}</td>
       <td class="sub">${esc(r.submission_ts||'')}<div>${deadline(r.days_to_deadline)}</div></td>
     </tr>`).join(''));
+}
+
+function renderAwards(d){
+  const prods = (d.products||[]).filter(g => g.lines > 0);
+  const cards = prods.slice(0, 12).map(g => `<div class="prod" onclick="$('#q').value=${esc(JSON.stringify(g.rdl_code||g.name))};load()">
+      <div class="n">${esc(g.name||g.rdl_code)}</div>
+      <div class="range">${g.min_cost===g.max_cost
+        ? `<b>${money(g.median_cost, g.currency, 4)}</b> <span class="sub">per unit</span>`
+        : `<b>${money(g.min_cost, g.currency, 4)}</b> – <b>${money(g.max_cost, g.currency, 4)}</b> <span class="sub">per unit</span>
+           <div class="sub">median ${money(g.median_cost, g.currency, 4)}</div>`}</div>
+      <div class="sub">${num(g.lines)} award line${g.lines>1?'s':''} · ${num(g.qty)} units · ${g.makers.length} maker${g.makers.length===1?'':'s'}
+        ${g.excl_tax && g.incl_tax ? ' · mixed tax basis' : g.excl_tax ? ' · excl. tax' : ''}</div>
+    </div>`).join('');
+  const note = `<p class="note">Awarded prices are published by Jordan's JONEPS; Saudi NUPCO does not publish them.
+    Unit cost is total value ÷ awarded quantity — per tablet, vial or bottle, with free goods netted out —
+    and ranges are only ever shown within one product. Military hospitals buy tax-exempt, so check the tax basis.</p>`;
+  const lines = (d.results||[]).map(a => `<tr onclick="openTender(${a.post_id})">
+      <td class="sub">${esc(a.published_at||'')}</td>
+      <td class="desc">${flag('JO')}<b>${esc(a.scientific_name||'')}</b>
+        <div class="sub">${esc(a.brand||'')}</div></td>
+      <td>${esc(a.manufacturer||'')}<div class="sub">${esc(a.origin_country||'')}</div></td>
+      <td class="sub">${esc(a.supplier||'')}</td>
+      <td class="num">${num(a.awarded_qty)}<div class="sub">${esc(a.pack||'')}</div></td>
+      <td class="num">${money(a.unit_price, a.currency)}${taxTag(a.price_incl_tax)}<div class="sub">per pack</div></td>
+      <td class="num"><b>${money(a.unit_cost, a.currency, 4)}</b><div class="sub">per unit</div></td>
+      <td class="num">${money(a.total_value, a.currency, 0)}</td>
+      <td class="sub">${esc(a.beneficiary||a.buyer||'')}<div>${esc(a.award_reason||'')}</div></td>
+    </tr>`).join('');
+  $('#results').innerHTML = note + (cards ? `<div class="prods">${cards}</div>` : '') + table(
+    `<th>Awarded</th><th>Drug · brand</th><th>Manufacturer</th><th>Supplier</th>
+     <th class="num">Qty</th><th class="num">Price</th><th class="num">Unit cost</th>
+     <th class="num">Total</th><th>For · reason</th>`, lines);
 }
 
 function renderCatalog(d){
@@ -345,10 +436,21 @@ async function openTender(id){
     const items = (t.items||[]).map(i => `<tr>
         <td class="sub">${esc(i.sn||'')}</td>
         <td class="code">${esc(i.nupco_code||'')}</td>
-        <td class="desc">${esc(i.description)}</td>
+        <td class="desc">${esc(i.description)}${i.generic_name ? `<div class="sub">${esc(i.generic_name)}${i.rdl_code?' · RDL '+esc(i.rdl_code):''}</div>` : ''}</td>
         <td class="sub">${esc(i.uom||'')}</td>
         <td class="num">${num(i.qty)}</td>
         <td>${catPill(i.category_guess)}</td></tr>`).join('');
+
+    const jo = t.country === 'JO';
+    const awards = (t.awards||[]).map(a => `<tr>
+        <td class="desc"><b>${esc(a.scientific_name||'')}</b><div class="sub">${esc(a.brand||'')}</div></td>
+        <td>${esc(a.manufacturer||'')}<div class="sub">${esc(a.origin_country||'')}</div></td>
+        <td class="sub">${esc(a.supplier||'')}</td>
+        <td class="sub">${esc(a.beneficiary||'')}</td>
+        <td class="num">${num(a.awarded_qty)}</td>
+        <td class="num">${money(a.unit_price, a.currency)}${taxTag(a.price_incl_tax)}</td>
+        <td class="num"><b>${money(a.unit_cost, a.currency, 4)}</b></td>
+        <td class="num">${money(a.total_value, a.currency, 0)}</td></tr>`).join('');
 
     const hist = (t.history||[]).map(h => `<tr>
         <td class="sub">${esc(String(h.changed_at).slice(0,16).replace('T',' '))}</td>
@@ -359,7 +461,7 @@ async function openTender(id){
     showDrawer(`
       <div class="dhead">
         <div style="flex:1">
-          <div style="font-size:18px;font-weight:700">${esc(t.tender_id)}</div>
+          <div style="font-size:18px;font-weight:700">${flag(t.country)}${esc(t.tender_id)}</div>
           <div class="sub">${esc(t.title_en||'')}</div>
           <div class="sub ar">${esc(t.title_ar||'')}</div>
         </div>
@@ -368,17 +470,24 @@ async function openTender(id){
       <div class="dbody">
         <dl class="kv">
           <dt>Status</dt><dd>${esc(t.status_label||'—')} ${catPill(t.category_guess)}</dd>
-          <dt>Opening date</dt><dd>${esc(t.opening_ts||'—')}</dd>
+          ${jo ? `<dt>Buyer</dt><dd>${esc(t.buyer||'—')}</dd>
+          <dt>Therapeutic class</dt><dd>${esc(t.subcategory||'—')}</dd>
+          <dt>Method</dt><dd>${esc(t.method||'—')} · fiscal year ${esc(t.fiscal_year||'—')}</dd>` : ''}
+          <dt>${jo ? 'Published' : 'Opening date'}</dt><dd>${esc(t.opening_ts||'—')}</dd>
           <dt>Submission deadline</dt><dd>${esc(t.submission_ts||'—')} · ${deadline(t.days_to_deadline)}</dd>
-          <dt>Bid opening</dt><dd>${esc(t.bid_opening_ts||'—')}</dd>
-          <dt>Booklet price</dt><dd>${t.booklet_price_sar?num(t.booklet_price_sar)+' SAR':'—'}</dd>
+          ${jo ? '' : `<dt>Bid opening</dt><dd>${esc(t.bid_opening_ts||'—')}</dd>
+          <dt>Booklet price</dt><dd>${t.booklet_price_sar?num(t.booklet_price_sar)+' SAR':'—'}</dd>`}
           <dt>Line items</dt><dd>${num(t.item_count)} · total qty ${num(t.total_qty)}</dd>
           <dt>Listed on site</dt><dd>${t.is_listed?'yes':'no (hidden or archived)'}</dd>
           <dt>Last changed</dt><dd class="sub">${esc(String(t.last_changed_at||'').slice(0,16).replace('T',' '))}</dd>
-          <dt>Links</dt><dd><a href="${esc(t.url)}" target="_blank">Tender page</a>
+          <dt>Links</dt><dd><a href="${esc(t.url)}" target="_blank">${jo ? 'Open on JONEPS' : 'Tender page'}</a>
             ${t.buy_url?` · <a href="${esc(t.buy_url)}" target="_blank">Buy on SAP portal</a>`:''}</dd>
         </dl>
-        <h3>Files</h3><div class="files">${files}</div>
+        ${jo ? '' : `<h3>Files</h3><div class="files">${files}</div>`}
+        ${awards ? `<h3>Award${(t.awards||[]).length>1?'s':''} · ${num((t.awards||[]).length)} priced line${(t.awards||[]).length>1?'s':''}</h3>
+        <div class="panel"><table><thead><tr><th>Drug · brand</th><th>Manufacturer</th><th>Supplier</th>
+          <th>For</th><th class="num">Qty</th><th class="num">Price / pack</th><th class="num">Unit cost</th>
+          <th class="num">Total</th></tr></thead><tbody>${awards}</tbody></table></div>` : ''}
         <h3>Line items (${num(t.item_total)}${t.item_total > (t.items||[]).length
           ? ` — showing first ${num((t.items||[]).length)}` : ''})</h3>
         <div class="panel">${items ? `<table><thead><tr><th>SN</th><th class="code">SAP code</th>
@@ -431,7 +540,12 @@ document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
   $('#q').placeholder = state.tab === 'tenders'
     ? 'Search tender titles and ids…'
     : state.tab === 'changes' ? 'Change feed (search does not apply here)'
+    : state.tab === 'awards' ? 'Search a drug, brand, manufacturer, supplier or RDL code…'
     : 'Search a drug, device or tender…';
+  setSorts(state.tab === 'awards' ? 'awards' : 'default');
+  // Awards are Jordan-only today, and are not categorised or open/closed.
+  ['country','category','status'].forEach(id => $('#'+id).style.display = state.tab === 'awards' ? 'none' : '');
+  document.querySelectorAll('.chk').forEach(el => el.style.display = state.tab === 'awards' ? 'none' : '');
   load();
 });
 $('#q').oninput = () => {
@@ -439,6 +553,7 @@ $('#q').oninput = () => {
   // so the list never silently orders by the longest-closed tender.
   const hasQ = $('#q').value.trim().length > 0;
   const opt = $('#sort').querySelector('option[value="relevance"]');
+  if (!opt) { clearTimeout(timer); timer = setTimeout(() => { state.offset = 0; load(); }, 280); return; }
   opt.disabled = !hasQ;
   opt.textContent = hasQ ? 'Sort: best match' : 'Sort: best match (type to search)';
   if (!hasQ && $('#sort').value === 'relevance') $('#sort').value = 'opening_desc';
@@ -446,7 +561,7 @@ $('#q').oninput = () => {
                                                 $('#sort').dataset.auto = '0'; }
   clearTimeout(timer); timer = setTimeout(() => { state.offset = 0; load(); }, 280);
 };
-['category','status','sort','open_only','hide_accessories'].forEach(id =>
+['country','category','status','sort','open_only','hide_accessories'].forEach(id =>
   $('#'+id).onchange = () => { state.offset = 0; load(); });
 $('#prev').onclick = () => { state.offset = Math.max(0, state.offset - state.limit); load(); };
 $('#next').onclick = () => { state.offset += state.limit; load(); };

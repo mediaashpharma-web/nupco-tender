@@ -1,20 +1,32 @@
-name: NUPCO daily refresh
+name: Tender daily refresh
 
 # Why GitHub Actions and not a hosted cron: Render's cron jobs are not in the
 # free tier, and Vercel's hobby functions cap out long before a crawl that
 # takes 10-30 minutes. Actions gives a real Python environment with no time
 # pressure, for nothing.
+#
+# Two sources, run one after the other in one job: Saudi Arabia (NUPCO) and
+# Jordan (JONEPS). They share a database but never each other's failures --
+# Jordan runs even if Saudi fails -- and never each other's rows: every sweep
+# that marks tenders as gone is scoped to its own source.
 on:
   schedule:
-    - cron: "30 3 * * *"        # 03:30 UTC = 06:30 Riyadh / 09:00 IST
+    - cron: "30 3 * * *"        # 03:30 UTC = 06:30 Riyadh and Amman / 09:00 IST
   workflow_dispatch:
     inputs:
       mode:
-        description: "Pipeline mode"
+        description: >-
+          incremental = both countries, the daily run.
+          jordan-backfill = Jordan history (set years below; resumable, re-run to continue).
+          The others are Saudi-only; seed replaces EVERYTHING, Jordan included.
         required: true
         default: incremental
         type: choice
-        options: [incremental, backfill, seed, reparse, reclassify]
+        options: [incremental, jordan-backfill, backfill, seed, reparse, reclassify]
+      years:
+        description: "jordan-backfill only: fiscal years, e.g. 2024,2025 (blank = 2018 to now)"
+        required: false
+        default: ""
 
 concurrency:
   group: nupco-refresh          # never let two crawls write at once
@@ -26,6 +38,10 @@ jobs:
     timeout-minutes: 340
     permissions:
       contents: write           # for the keepalive commit below
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      NUPCO_KEEP_FILES: "0"     # hash and parse documents, keep none
+      MODE: ${{ inputs.mode || 'incremental' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -38,22 +54,40 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run pipeline
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          NUPCO_KEEP_FILES: "0"   # hash and parse documents, keep none
+      - name: Check the database secret
         run: |
           if [ -z "$DATABASE_URL" ]; then
             echo "::error::DATABASE_URL secret is not set."
             echo "Add it under Settings -> Secrets and variables -> Actions."
             exit 1
           fi
-          python -m pipeline.run "${{ inputs.mode || 'incremental' }}"
 
-      - name: Summarise the run
-        if: always()
+      - name: Saudi Arabia (NUPCO)
+        if: env.MODE != 'jordan-backfill'
+        run: python -m pipeline.run "$MODE"
+
+      - name: Summarise Saudi Arabia
+        if: "!cancelled() && env.MODE != 'jordan-backfill'"
+        run: python -m pipeline.report >> "$GITHUB_STEP_SUMMARY"
+
+      # Jordan runs whether or not the Saudi step succeeded: the two portals
+      # fail independently, and one being down is no reason to skip the other.
+      - name: Jordan (JONEPS)
+        if: "!cancelled() && (env.MODE == 'incremental' || env.MODE == 'jordan-backfill')"
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          YEARS: ${{ inputs.years }}
+        run: |
+          if [ "$MODE" = "jordan-backfill" ]; then
+            # Leaves room inside the job's 340 minutes to finish cleanly. The
+            # crawl commits tender by tender, so a run that meets the budget
+            # simply stops, and the next run picks up where it left off.
+            python -m pipeline.joneps backfill ${YEARS:+--years "$YEARS"} --max-minutes 300
+          else
+            python -m pipeline.joneps incremental --max-minutes 120
+          fi
+
+      - name: Summarise Jordan
+        if: "!cancelled() && (env.MODE == 'incremental' || env.MODE == 'jordan-backfill')"
         run: python -m pipeline.report >> "$GITHUB_STEP_SUMMARY"
 
       # GitHub disables scheduled workflows after 60 days without repo
