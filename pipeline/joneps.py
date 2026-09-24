@@ -648,9 +648,34 @@ def process_tender(conn, client: Client, run_id: int, pid: int, t: dict,
 
 # --- the run ------------------------------------------------------------------------
 
+BATCH = 100      # tenders between progress checkpoints
+
+
+def _checkpoint(conn, run_id: int, batch: list[int], counts: dict, done: int, total: int,
+                requests: int) -> None:
+    """Make a finished batch fully visible while the crawl goes on.
+
+    Every tender is already committed on its own, so nothing is lost between
+    checkpoints; this fills in what is otherwise only computed at the end --
+    the batch's line counts and countdowns -- and writes the running totals to
+    run_log, where the site's "last run" and the step summary read them."""
+    from .run import refresh_rollups
+    refresh_rollups(conn, batch)
+    fields = ("tenders_seen", "tenders_new", "tenders_changed", "files_changed",
+              "items_parsed", "errors")
+    conn.execute(f"UPDATE run_log SET {', '.join(f + '=?' for f in fields)}, notes=? "
+                 "WHERE run_id=?",
+                 [counts[f] for f in fields]
+                 + [json.dumps({"progress": f"{done}/{total}", "requests": requests,
+                                "award_lines": counts["award_lines"]}), run_id])
+    conn.commit()
+    log.info("  batch saved: %d/%d tenders, %d award lines, %d errors, %d requests",
+             done, total, counts["award_lines"], counts["errors"], requests)
+
+
 def run(mode: str = "incremental", years: list[int] | None = None, force: bool = False,
         max_minutes: float | None = None, limit: int | None = None,
-        client: Client | None = None) -> dict:
+        client: Client | None = None, batch_size: int = BATCH) -> dict:
     """Crawl JONEPS medicine tenders into the shared database.
 
     backfill    every year from 2018 (or --years), fetching each tender once;
@@ -682,6 +707,7 @@ def run(mode: str = "incremental", years: list[int] | None = None, force: bool =
     if limit:
         todo = todo[:limit]
     stopped_early = False
+    batch: list[int] = []
     for n, (pid, t) in enumerate(todo, start=1):
         if max_minutes and (time.monotonic() - started) / 60 > max_minutes:
             log.info("time budget of %s min reached after %d tenders; stopping cleanly",
@@ -701,9 +727,10 @@ def run(mode: str = "incremental", years: list[int] | None = None, force: bool =
             counts["errors"] += 1
             errors.append(f"{tender_id_for(t['tend_no'], t['tend_seq'])}: {type(e).__name__}: {e}")
             log.warning("tender %s failed: %s", tender_id_for(t["tend_no"], t["tend_seq"]), e)
-        if n % 50 == 0:
-            log.info("  %d/%d tenders, %d requests, %d award lines",
-                     n, len(todo), client.requests, counts["award_lines"])
+        batch.append(pid)
+        if len(batch) >= batch_size:
+            _checkpoint(conn, run_id, batch, counts, n, len(todo), client.requests)
+            batch = []
 
     from .run import refresh_rollups
     refresh_rollups(conn)
@@ -735,12 +762,15 @@ def main(argv=None) -> int:
     ap.add_argument("--force", action="store_true", help="re-fetch tenders already captured")
     ap.add_argument("--max-minutes", type=float, help="stop cleanly after this long; resumable")
     ap.add_argument("--limit", type=int, help="only process the first N tenders")
+    ap.add_argument("--batch", type=int, default=BATCH,
+                    help=f"tenders between progress checkpoints (default {BATCH})")
     ap.add_argument("--quiet", action="store_true")
     a = ap.parse_args(argv)
     _setup_logging(not a.quiet)
     years = [int(y) for y in a.years.split(",")] if a.years else None
     try:
-        result = run(a.mode, years=years, force=a.force, max_minutes=a.max_minutes, limit=a.limit)
+        result = run(a.mode, years=years, force=a.force, max_minutes=a.max_minutes, limit=a.limit,
+                     batch_size=a.batch)
     except Exception:                           # noqa: BLE001
         log.error("JONEPS run crashed:\n%s", traceback.format_exc())
         return 2

@@ -527,6 +527,34 @@ class TestJoneps(unittest.TestCase):
                 implied = r["unit_price"] * r["awarded_qty"] / r["pack_size"]
                 self.assertAlmostEqual(implied, r["total_value"], delta=r["total_value"] * 0.01)
 
+    def test_checkpoint_shows_a_batch_while_the_crawl_runs(self):
+        """Each batch's tenders get their counts, and run_log its running totals,
+        before the run ends -- so a long backfill fills the site in as it goes."""
+        conn = fresh_db()
+        run_id = db.start_run(conn, "joneps-backfill")
+        a, b = self.J.post_id_for("2024000001", "00"), self.J.post_id_for("2024000002", "00")
+        for pid in (a, b):
+            db.upsert_tender(conn, run_id, tender(post_id=pid, tender_id=str(pid),
+                                                  url=f"https://joneps/{pid}", source="joneps"))
+            conn.execute(
+                "INSERT INTO attachments(post_id, tender_id, role, url, version, is_current,"
+                " first_seen_at, last_seen_at, last_changed_at)"
+                " VALUES (?, ?, 'item_list', 'u', 1, 1, 'x', 'x', 'x')", (pid, str(pid)))
+        conn.execute("UPDATE tenders SET attachment_count=0")
+        conn.commit()
+        counts = dict(tenders_seen=100, tenders_new=100, tenders_changed=0, files_changed=100,
+                      items_parsed=900, errors=1, award_lines=250, awards_changed=40)
+        self.J._checkpoint(conn, run_id, [a], counts, 100, 7000, 180)
+        got = {r["post_id"]: r["attachment_count"]
+               for r in conn.execute("SELECT post_id, attachment_count FROM tenders")}
+        self.assertEqual(got[a], 1, "the finished batch is rolled up")
+        self.assertEqual(got[b], 0, "tenders outside the batch are left for their own")
+        r = conn.execute("SELECT status, tenders_seen, items_parsed, notes FROM run_log"
+                         " WHERE run_id=?", (run_id,)).fetchone()
+        self.assertEqual((r["status"], r["tenders_seen"], r["items_parsed"]),
+                         ("running", 100, 900))
+        self.assertEqual(json.loads(r["notes"])["progress"], "100/7000")
+
     def test_one_source_never_delists_the_other(self):
         """Each crawler only sees its own portal. An unscoped delist sweep would
         let the nightly Saudi run mark every Jordanian tender as gone."""

@@ -237,8 +237,11 @@ async function loadStats(){
       <span><b>${num(s.items)}</b> line items</span>
       <span><b>${num(s.codes)}</b> distinct items</span>
       <span><b>${num(s.award_lines)}</b> priced award lines</span>
-      <span title="${esc(r.finished_at||'')}">last run: <b>${esc(r.status||'—')}</b>
-        ${r.finished_at ? esc(String(r.finished_at).slice(0,16).replace('T',' ')) : ''}</span>`;
+      ${r.status === 'running'
+        ? `<span>${esc(String(r.mode||'').startsWith('joneps') ? 'Jordan' : 'Saudi')} update running${
+            r.progress ? `: <b>${esc(r.progress)}</b> tenders` : ''}</span>`
+        : `<span title="${esc(r.finished_at||'')}">last run: <b>${esc(r.status||'—')}</b>
+        ${r.finished_at ? esc(String(r.finished_at).slice(0,16).replace('T',' ')) : ''}</span>`}`;
     const sel = $('#status');
     if (sel.options.length <= 1)
       (s.by_status||[]).forEach(x => sel.add(new Option(`${x.label} (${x.n})`, x.label)));

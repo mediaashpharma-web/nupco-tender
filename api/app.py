@@ -160,8 +160,16 @@ def api_stats() -> dict:
     """) or {}
     s["last_run"] = one(
         "SELECT run_id, mode, started_at, finished_at, status, tenders_seen,"
-        " tenders_new, tenders_changed, files_changed, items_parsed, errors"
+        " tenders_new, tenders_changed, files_changed, items_parsed, errors, notes"
         " FROM run_log ORDER BY run_id DESC LIMIT 1")
+    # A long crawl writes "done/total" into notes at every checkpoint; surface
+    # it so the page can show a backfill filling in while it runs.
+    if s["last_run"]:
+        try:
+            s["last_run"]["progress"] = (json.loads(s["last_run"].pop("notes") or "{}")
+                                         .get("progress"))
+        except (ValueError, AttributeError):
+            s["last_run"]["progress"] = None
     s["by_status"] = rows(
         "SELECT COALESCE(status_label,'(none)') AS label, COUNT(*) AS n"
         " FROM tenders GROUP BY status_label ORDER BY n DESC")

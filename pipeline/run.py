@@ -433,9 +433,14 @@ def reclassify(conn, batch: int = 20000) -> int:
     return total
 
 
-def refresh_rollups(conn) -> None:
-    """Denormalise per-tender counts and refresh the daily countdown."""
-    conn.execute("""
+def refresh_rollups(conn, post_ids=None) -> None:
+    """Denormalise per-tender counts and refresh the daily countdown.
+
+    With post_ids, only those tenders: a long crawl calls this after every
+    batch so its tenders show their line counts while it is still running."""
+    ids = list(post_ids or [])
+    scope = f" AND post_id IN ({','.join('?' * len(ids))})" if ids else ""
+    conn.execute(f"""
         UPDATE tenders SET
           item_count = COALESCE((SELECT COUNT(*) FROM tender_items i
                                  JOIN attachments a ON a.id = i.attachment_id
@@ -445,20 +450,21 @@ def refresh_rollups(conn) -> None:
                         WHERE i.post_id = tenders.post_id AND a.is_current = 1),
           attachment_count = COALESCE((SELECT COUNT(*) FROM attachments a
                                        WHERE a.post_id = tenders.post_id AND a.is_current = 1), 0)
-    """)
+        WHERE 1=1{scope}
+    """, ids)
     # Date arithmetic is the one place the two engines genuinely diverge:
     # SQLite counts Julian days, Postgres subtracts dates directly.
     if conn.is_pg:
-        conn.execute("""
+        conn.execute(f"""
             UPDATE tenders SET days_to_deadline = (submission_ts::date - CURRENT_DATE)
-            WHERE submission_ts IS NOT NULL AND submission_ts <> ''
-        """)
+            WHERE submission_ts IS NOT NULL AND submission_ts <> ''{scope}
+        """, ids)
     else:
-        conn.execute("""
+        conn.execute(f"""
             UPDATE tenders SET days_to_deadline =
               CAST(julianday(submission_ts) - julianday('now','localtime') AS INTEGER)
-            WHERE submission_ts IS NOT NULL
-        """)
+            WHERE submission_ts IS NOT NULL{scope}
+        """, ids)
     conn.commit()
 
 
