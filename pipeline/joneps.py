@@ -68,8 +68,11 @@ LIST_PAGE_SIZE = 100
 # makes the key a pure function of (tendNo, tendSeq), so every run agrees.
 ID_BASE = 10 ** 12
 
-STATUSES = {                   # searchTendStatusCd -> (label, terminal)
-    "Opened":          ("Open", False),
+# searchTendStatusCd -> (label, terminal). "Opened" means the BIDS were opened
+# -- every such tender's deadline has passed. A tender still taking bids carries
+# no status at all; tender_record() labels those from the deadline.
+STATUSES = {
+    "Opened":          ("Bids opened", False),
     "Initial_Awarded": ("Initially awarded", False),
     "Final_Awarded":   ("Awarded", True),
 }
@@ -388,9 +391,14 @@ def discover(client: Client, years: list[int]) -> tuple[dict[int, dict], list[st
     return found, errors
 
 
-def tender_record(pid: int, t: dict) -> dict:
+def tender_record(pid: int, t: dict, today: date | None = None) -> dict:
     label, terminal = (STATUSES.get(t.get("status") or "")
                        or LIFECYCLE.get(t.get("status") or "") or (None, False))
+    if label is None:
+        # Unlabelled on the portal: open for bids until the deadline, then
+        # waiting for bid opening. Re-derived every run, so it rolls over.
+        deadline = t.get("deadline") or ""
+        label = "Open" if deadline >= (today or date.today()).isoformat() else "Closed"
     sub = t.get("subcategory")
     return {
         "post_id": pid, "tender_id": tender_id_for(t["tend_no"], t["tend_seq"]),

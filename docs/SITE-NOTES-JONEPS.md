@@ -25,7 +25,7 @@ earlier page of the same session.
 | `searchTendTypeCd1=EP0016` | Tender type **Medicines** (`EP0011` supplies, `EP0012` services, `EP0014` technical services, `EP0015` works) |
 | `searchTendTypeCd2=EP04xx` | Therapeutic class, `EP0401`-`EP0417`. The page's JS copies `tendTypeCd2Medicine` into this before submitting; sending it directly works |
 | `searchFiscalYear` | `2018`-current. Note tender *numbers* can carry the next year (a `2026…` tender in fiscal 2025) |
-| `searchTendStatusCd` | Award axis: `Opened`, `Initial_Awarded`, `Final_Awarded` |
+| `searchTendStatusCd` | Award axis: `Opened` (= bids opened, deadline passed), `Initial_Awarded`, `Final_Awarded`. A tender still taking bids has **no** status and matches none of them |
 | `searchTendStatCd` | Lifecycle axis: `EP0034` cancelled, `EP0035` re-tendered, `EP0854` frozen, `EP0560`/`EP0561` technical/financial opening published, `EP0032`/`EP0190`/`EP0856` amended |
 | `recordCountPerPage` | UI offers 5-20; **the server honours 100** |
 | `currentPageNo` | 1-based |

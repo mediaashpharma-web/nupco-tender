@@ -432,6 +432,20 @@ class TestJoneps(unittest.TestCase):
         self.assertGreater(a, 10 ** 12, "must never collide with a NUPCO WordPress id")
         self.assertLess(J.post_id_for("2099999999", "99"), 2 ** 63)
 
+    def test_status_open_comes_from_the_deadline(self):
+        # Checked against fiscal 2026: every tender filed under "Opened" had a
+        # past deadline, and the 29 still taking bids carried no status at all.
+        from datetime import date
+        J, today = self.J, date(2026, 9, 24)
+        listed = J.parse_list((self.FIX / "list_page.html").read_text(encoding="utf-8"))[0]
+        row = {**listed, "deadline": "2026-09-28", "year": 2026, "labels": set(), "status": None}
+        self.assertEqual(J.tender_record(1, row, today)["status_label"], "Open")
+        self.assertEqual(J.tender_record(1, row, date(2026, 9, 28))["status_label"], "Open",
+                         "still open on the deadline day")
+        self.assertEqual(J.tender_record(1, row, date(2026, 9, 29))["status_label"], "Closed")
+        opened = {**row, "deadline": "2026-09-01", "labels": {"Opened"}, "status": "Opened"}
+        self.assertEqual(J.tender_record(1, opened, today)["status_label"], "Bids opened")
+
     def test_count_uses_a_dot_as_thousands_separator(self):
         html = (self.FIX / "list_page.html").read_text(encoding="utf-8")
         self.assertEqual(self.J.parse_total(html), 1045, "'1.045' is one thousand and forty-five")
