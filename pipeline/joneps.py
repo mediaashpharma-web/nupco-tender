@@ -206,7 +206,7 @@ class Client:
             time.sleep(wait)
         self._last = time.monotonic()
 
-    def _open(self, req, attempts: int = 4) -> tuple[int, bytes]:
+    def _open(self, req, attempts: int = 5) -> tuple[int, bytes]:
         for attempt in range(attempts):
             self._pace()
             self.requests += 1
@@ -217,12 +217,16 @@ class Client:
                 # 404 is an answer, not a failure: tabs that are not public 404.
                 if e.code == 404:
                     return 404, b""
+                # 403 is either an expired session or the portal shedding load
+                # -- it has come back in the middle of a run -- and 5xx is the
+                # portal struggling. Both pass; back off long enough to let them.
                 if e.code in (401, 403, 419) and attempt < attempts - 1:
-                    self._token = None                # session expired; start over
+                    time.sleep(20 * (attempt + 1))
+                    self._token = None                # new session, new token
                     self.token()
                     continue
                 if e.code >= 500 and attempt < attempts - 1:
-                    time.sleep(5 * (attempt + 1))
+                    time.sleep(20 * (attempt + 1))
                     continue
                 raise
             except (urllib.error.URLError, TimeoutError, ConnectionError):
@@ -364,27 +368,45 @@ def discover(client: Client, years: list[int]) -> tuple[dict[int, dict], list[st
     found: dict[int, dict] = {}
     errors: list[str] = []
     for year in years:
+        # All of a year's passes, or none of them. A tender's status is only
+        # known once every pass has run -- "Awarded" comes from the status
+        # pass, "Cancelled" from the lifecycle one -- so a year that fails
+        # half way would relabel its tenders from half the evidence. It did
+        # once: a 503 mid-2025 turned 170 awarded and 380 cancelled tenders
+        # into "Closed". A failed year is left out; its tenders keep their
+        # labels until a later run gets through.
+        got: dict[int, dict] = {}
+
+        def add(r, label=None, sub=None):
+            pid = post_id_for(r["tend_no"], r["tend_seq"])
+            t = got.setdefault(pid, {**r, "year": year, "subcategory": None, "labels": set()})
+            if label:
+                t["labels"].add(label)
+            if sub:
+                t["subcategory"] = sub
+
         try:
             for r in _crawl_list(client, searchFiscalYear=year):
-                pid = post_id_for(r["tend_no"], r["tend_seq"])
-                found.setdefault(pid, {**r, "year": year, "subcategory": None, "labels": set()})
+                add(r)
             for code in STATUSES:
                 for r in _crawl_list(client, searchFiscalYear=year, searchTendStatusCd=code):
-                    pid = post_id_for(r["tend_no"], r["tend_seq"])
-                    found.setdefault(pid, {**r, "year": year, "subcategory": None,
-                                           "labels": set()})["labels"].add(code)
+                    add(r, label=code)
             for code in LIFECYCLE:
                 for r in _crawl_list(client, searchFiscalYear=year, searchTendStatCd=code):
-                    pid = post_id_for(r["tend_no"], r["tend_seq"])
-                    found.setdefault(pid, {**r, "year": year, "subcategory": None,
-                                           "labels": set()})["labels"].add(code)
+                    add(r, label=code)
             for code in SUBCATEGORIES:
                 for r in _crawl_list(client, searchFiscalYear=year, searchTendTypeCd2=code):
-                    pid = post_id_for(r["tend_no"], r["tend_seq"])
-                    found.setdefault(pid, {**r, "year": year, "labels": set()})["subcategory"] = code
+                    add(r, sub=code)
         except Exception as e:                          # noqa: BLE001
             errors.append(f"{year}: {type(e).__name__}: {e}")
-            log.warning("discovery failed for %s: %s", year, e)
+            log.warning("discovery failed for %s, skipping the year this run: %s", year, e)
+            continue
+        for pid, t in got.items():
+            if pid in found:                            # listed under two years
+                found[pid]["labels"] |= t["labels"]
+                found[pid]["subcategory"] = found[pid]["subcategory"] or t["subcategory"]
+            else:
+                found[pid] = t
         log.info("  %s: %d tenders so far", year, len(found))
     for t in found.values():
         t["status"] = next((c for c in STATUS_PRECEDENCE if c in t["labels"]), None)

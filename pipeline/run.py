@@ -241,7 +241,15 @@ def run(mode: str = "incremental", force: bool = False, limit: int | None = None
         discard_scratch_files(conn)
 
     # --- phase 5: rollups, delisting, indexes -------------------------------
-    refresh_rollups(conn)
+    # Everything above is committed; a failed tidy-up must not throw it away
+    # or leave run_log reading "running" -- it is an error, not a crash.
+    try:
+        refresh_rollups(conn)
+    except Exception as e:                      # noqa: BLE001
+        conn.rollback()
+        counts["errors"] += 1
+        errors.append(f"rollups: {type(e).__name__}: {e}")
+        log.warning("rollups failed (crawl results are saved): %s", e)
     if complete_crawl and mode != "reparse" and not limit:
         n = db.mark_unseen_as_delisted(conn, run_id, seen_post_ids)
         if n:

@@ -576,6 +576,25 @@ class TestJoneps(unittest.TestCase):
         self.assertEqual(st[old], "abandoned")
         self.assertEqual(st[recent], "running", "a run inside the window may still be alive")
 
+    def test_a_year_that_fails_half_way_is_left_out_whole(self):
+        """Labels come from several passes. A year whose status pass fails must
+        not be relabelled from the passes that did work -- that turned awarded
+        and cancelled tenders into "Closed" once."""
+        page = (self.FIX / "list_page.html").read_text(encoding="utf-8")
+
+        class Flaky:
+            requests = 0
+
+            def list_page(self, n, **f):
+                if f.get("searchFiscalYear") == 2025 and "searchTendStatusCd" in f:
+                    raise OSError("HTTP Error 503: Service Unavailable")
+                return page if f.get("searchFiscalYear") == 2024 or len(f) == 1 else ""
+
+        found, errors = self.J.discover(Flaky(), [2024, 2025])
+        self.assertEqual({t["year"] for t in found.values()}, {2024})
+        self.assertEqual(len(errors), 1)
+        self.assertIn("2025", errors[0])
+
     def test_one_source_never_delists_the_other(self):
         """Each crawler only sees its own portal. An unscoped delist sweep would
         let the nightly Saudi run mark every Jordanian tender as gone."""
